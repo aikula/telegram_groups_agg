@@ -1,11 +1,9 @@
-version: '3.8'
-
 services:
-  telegram-bot:
+  bot:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: telegram_chat_analytics_bot
+    container_name: chat-analytics-bot
     env_file:
       - .env
     environment:
@@ -14,17 +12,46 @@ services:
       - WEB_PORT=8000
     volumes:
       - ./data:/app/data
-    ports:
-      - "8000:8000"
+      - ./app:/app/app  # Code mount for live updates without rebuild
+    # Порт 8000 убран - Traefik будет проксировать трафик
+    # Для локальной разработки можно раскомментировать:
+    # ports:
+    #   - "8000:8000"
     restart: unless-stopped
     networks:
-      - bot-network
+      - tghub-network
+    labels:
+      # Включаем Traefik для этого сервиса
+      - "traefik.enable=true"
+      # HTTP роутер (редирект на HTTPS) - основной домен
+      - "traefik.http.routers.tghub-http.rule=Host(`tghub.kulinich.ru`) || Host(`www.tghub.kulinich.ru`)"
+      - "traefik.http.routers.tghub-http.entrypoints=web"
+      - "traefik.http.routers.tghub-http.middlewares=redirect-to-https"
+      # HTTPS роутер - основной домен
+      - "traefik.http.routers.tghub-https.rule=Host(`tghub.kulinich.ru`) || Host(`www.tghub.kulinich.ru`)"
+      - "traefik.http.routers.tghub-https.entrypoints=websecure"
+      - "traefik.http.routers.tghub-https.tls=true"
+      - "traefik.http.routers.tghub-https.tls.certresolver=myresolver"
+      # Сертификат для обоих доменов
+      - "traefik.http.routers.tghub-https.tls.domains[0].main=tghub.kulinich.ru"
+      - "traefik.http.routers.tghub-https.tls.domains[0].sans=www.tghub.kulinich.ru"
+      # Сервис
+      - "traefik.http.services.tghub.loadbalancer.server.port=8000"
+      # Middleware для редиректа HTTP → HTTPS
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.permanent=true"
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/api/health', timeout=5).status_code == 200"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
 
 networks:
-  bot-network:
-    driver: bridge
+  tghub-network:
+    external: true

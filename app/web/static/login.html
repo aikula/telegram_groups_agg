@@ -5,6 +5,146 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Вход - Telegram Chat Analytics</title>
     <link rel="stylesheet" href="/static/style.css">
+    <script src="https://telegram.org/js/telegram-widget.js?4"></script>
+    <style>
+        .login-container {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+        }
+        .login-card {
+            background: white;
+            border-radius: 16px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            width: 100%;
+            max-width: 420px;
+        }
+        .login-header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .login-header h1 {
+            margin: 15px 0 5px;
+            color: #333;
+        }
+        .login-header p {
+            color: #666;
+            margin: 0;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        .form-label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+            color: #333;
+        }
+        .form-control {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 15px;
+            box-sizing: border-box;
+            transition: border-color 0.3s;
+        }
+        .form-control:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 15px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            width: 100%;
+        }
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.4);
+        }
+        .btn-primary:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        .btn-secondary {
+            background: #f0f0f0;
+            color: #333;
+        }
+        .alert {
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .alert-danger {
+            background: #fee;
+            color: #c33;
+            border: 1px solid #fcc;
+        }
+        .alert-success {
+            background: #efe;
+            color: #3c3;
+            border: 1px solid #cfc;
+        }
+        .loading {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #fff;
+            border-radius: 50%;
+            border-top-color: transparent;
+            animation: spin 0.8s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        details {
+            margin-top: 30px;
+        }
+        summary {
+            cursor: pointer;
+            color: #666;
+            font-size: 14px;
+            padding: 10px;
+            user-select: none;
+        }
+        summary:hover {
+            color: #333;
+        }
+        .telegram-widget-container {
+            margin: 30px 0;
+            text-align: center;
+        }
+        .divider {
+            display: flex;
+            align-items: center;
+            margin: 30px 0;
+        }
+        .divider::before,
+        .divider::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: #e0e0e0;
+        }
+        .divider span {
+            padding: 0 15px;
+            color: #999;
+            font-size: 14px;
+        }
+    </style>
 </head>
 <body>
     <div class="login-container">
@@ -14,9 +154,10 @@
                     <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
                 </svg>
                 <h1>Telegram Analytics</h1>
-                <p>Войдите для доступа к дашборду</p>
+                <p>Войдите для доступа к аналитике</p>
             </div>
 
+            <!-- Superadmin Login Form -->
             <form id="loginForm">
                 <div id="alertContainer"></div>
 
@@ -28,8 +169,8 @@
                         name="username"
                         class="form-control"
                         placeholder="Введите логин"
+                        autocomplete="username"
                         required
-                        autofocus
                     >
                 </div>
 
@@ -41,62 +182,118 @@
                         name="password"
                         class="form-control"
                         placeholder="Введите пароль"
+                        autocomplete="current-password"
                         required
                     >
                 </div>
 
-                <button type="submit" class="btn btn-primary" style="width: 100%; margin-top: 10px;">
+                <button type="submit" class="btn btn-primary">
                     <span id="loginButtonText">Войти</span>
                     <span id="loginSpinner" class="loading" style="display: none;"></span>
                 </button>
             </form>
 
-            <p style="text-align: center; margin-top: 20px; color: #757575; font-size: 14px;">
-                По умолчанию: admin / ваш пароль из настроек
+            <div class="divider">
+                <span>или</span>
+            </div>
+
+            <!-- OTP Login Section -->
+            <div style="text-align: center; margin: 20px 0;">
+                <p style="color: #666; font-size: 14px; margin-bottom: 15px;">
+                    🔐 Вход через Telegram бот
+                </p>
+                <p style="color: #999; font-size: 13px; margin-bottom: 15px; line-height: 1.5;">
+                    1. Откройте бот @WhyVasyabot в Telegram<br>
+                    2. Напиши команду <code>/login</code><br>
+                    3. Введи полученный код ниже
+                </p>
+                <form id="otpForm" style="max-width: 200px; margin: 0 auto;">
+                    <div class="form-group">
+                        <input
+                            type="text"
+                            id="otpCode"
+                            name="otpCode"
+                            class="form-control"
+                            placeholder="123456"
+                            maxlength="6"
+                            pattern="[0-9]{6}"
+                            style="text-align: center; font-size: 24px; letter-spacing: 5px; font-weight: bold;"
+                            autocomplete="one-time-code"
+                            required
+                        >
+                    </div>
+                    <button type="submit" class="btn btn-primary" style="width: 100%;">
+                        <span id="otpButtonText">Войти по коду</span>
+                        <span id="otpSpinner" class="loading" style="display: none;"></span>
+                    </button>
+                </form>
+            </div>
+
+            <!-- Telegram Login Widget (hidden, replaced with OTP) -->
+            <div id="telegram-login-btn" class="telegram-widget-container" style="display: none;"></div>
+
+            <p style="text-align: center; margin-top: 20px; color: #999; font-size: 13px;">
+                Используя учётную запись администратора или код из Telegram бота
             </p>
         </div>
     </div>
 
     <script>
-        const loginForm = document.getElementById('loginForm');
-        const usernameInput = document.getElementById('username');
-        const passwordInput = document.getElementById('password');
-        const loginButtonText = document.getElementById('loginButtonText');
-        const loginSpinner = document.getElementById('loginSpinner');
-        const alertContainer = document.getElementById('alertContainer');
+        const botUsername = 'YOUR_BOT_USERNAME';
 
+        // Debug: Log bot username
+        console.log('[DEBUG] Bot username:', botUsername);
+        console.log('[DEBUG] Widget should load:', botUsername && botUsername !== '__CONFIG_PLACEHOLDER__');
+
+        // Clear any password from URL (security)
+        if (window.location.search && window.location.search.includes('password')) {
+            const url = new URL(window.location.href);
+            url.searchParams.delete('password');
+            window.history.replaceState({}, '', url.toString());
+        }
+
+        // Check if already logged in
+        if (localStorage.getItem('token')) {
+            window.location.href = '/';
+        }
+
+        // Show alert message
         function showAlert(message, type = 'danger') {
-            alertContainer.innerHTML = `
+            const container = document.getElementById('alertContainer');
+            container.innerHTML = `
                 <div class="alert alert-${type}">
                     ${message}
                 </div>
             `;
             setTimeout(() => {
-                alertContainer.innerHTML = '';
+                container.innerHTML = '';
             }, 5000);
         }
 
+        // Set loading state
         function setLoading(loading) {
-            loginButtonText.style.display = loading ? 'none' : 'inline';
-            loginSpinner.style.display = loading ? 'inline-block' : 'none';
-            loginForm.querySelector('button[type="submit"]').disabled = loading;
+            document.getElementById('loginButtonText').style.display = loading ? 'none' : 'inline';
+            document.getElementById('loginSpinner').style.display = loading ? 'inline-block' : 'none';
+            document.querySelector('#loginForm button[type="submit"]').disabled = loading;
         }
 
+        // Login form handler
+        const loginForm = document.getElementById('loginForm');
         loginForm.addEventListener('submit', async (e) => {
             e.preventDefault();
 
-            const username = usernameInput.value.trim();
-            const password = passwordInput.value;
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value;
 
             if (!username || !password) {
-                showAlert('Пожалуйста, заполните все поля');
+                showAlert('Пожалуйста, введите логин и пароль');
                 return;
             }
 
             setLoading(true);
 
             try {
-                const response = await fetch('/api/auth/login', {
+                const response = await fetch('/api/auth/superadmin', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -109,10 +306,19 @@
                 if (response.ok) {
                     // Store token
                     localStorage.setItem('token', data.access_token);
-                    localStorage.setItem('username', data.username);
-
-                    // Redirect to dashboard
-                    window.location.href = '/';
+                    // Fetch user info to get role
+                    fetch('/api/auth/me', {
+                        headers: { 'Authorization': `Bearer ${data.access_token}` }
+                    }).then(resp => resp.json()).then(userInfo => {
+                        localStorage.setItem('username', userInfo.username);
+                        localStorage.setItem('is_superadmin', userInfo.is_superadmin);
+                        window.location.href = '/';
+                    }).catch(() => {
+                        // Fallback - superadmin is always admin
+                        localStorage.setItem('username', username);
+                        localStorage.setItem('is_superadmin', 'true');
+                        window.location.href = '/';
+                    });
                 } else {
                     showAlert(data.detail || 'Ошибка входа', 'danger');
                 }
@@ -124,17 +330,162 @@
             }
         });
 
-        // Check if already logged in
-        if (localStorage.getItem('token')) {
-            window.location.href = '/';
+        // OTP Login form handler
+        const otpForm = document.getElementById('otpForm');
+        if (otpForm) {
+            otpForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+
+                const code = document.getElementById('otpCode').value.trim();
+
+                if (!code || code.length !== 6 || !/^\d{6}$/.test(code)) {
+                    showAlert('Введите 6-значный код из Telegram');
+                    return;
+                }
+
+                setOtpLoading(true);
+
+                try {
+                    const response = await fetch('/api/auth/otp', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({ code })
+                    });
+
+                    const data = await response.json();
+
+                    if (response.ok) {
+                        // Store token
+                        localStorage.setItem('token', data.access_token);
+                        // Store user info (fetch from /me endpoint)
+                        fetch('/api/auth/me', {
+                            headers: { 'Authorization': `Bearer ${data.access_token}` }
+                        }).then(resp => resp.json()).then(user => {
+                            localStorage.setItem('username', user.username);
+                            localStorage.setItem('is_superadmin', user.is_superadmin);
+                            // Redirect to dashboard
+                            window.location.href = '/';
+                        }).catch(() => {
+                            // Fallback if /me fails
+                            window.location.href = '/';
+                        });
+                    } else {
+                        showAlert(data.detail || 'Неверный или устаревший код', 'danger');
+                    }
+                } catch (error) {
+                    showAlert('Ошибка соединения с сервером', 'danger');
+                    console.error('OTP login error:', error);
+                } finally {
+                    setOtpLoading(false);
+                }
+            });
         }
 
-        // Allow Enter key to submit
-        passwordInput.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') {
-                loginForm.dispatchEvent(new Event('submit'));
+        // Set OTP loading state
+        function setOtpLoading(loading) {
+            document.getElementById('otpButtonText').style.display = loading ? 'none' : 'inline';
+            document.getElementById('otpSpinner').style.display = loading ? 'inline-block' : 'none';
+            document.querySelector('#otpForm button[type="submit"]').disabled = loading;
+        }
+
+        // Auto-format OTP input (only digits, max 6)
+        const otpInput = document.getElementById('otpCode');
+        if (otpInput) {
+            otpInput.addEventListener('input', (e) => {
+                e.target.value = e.target.value.replace(/\D/g, '').slice(0, 6);
+            });
+        }
+
+        // Telegram Login Widget initialization
+        console.log('[DEBUG] Checking widget conditions...');
+        if (botUsername && botUsername !== '__CONFIG_PLACEHOLDER__' && botUsername.trim() !== '') {
+            console.log('[DEBUG] Initializing Telegram widget for:', botUsername);
+
+            // Wait for Telegram script to load
+            window.addEventListener('load', function() {
+                setTimeout(function() {
+                    console.log('[DEBUG] Page loaded, checking Telegram object...');
+
+                    if (typeof Telegram === 'undefined') {
+                        console.error('[ERROR] Telegram object not found - script failed to load');
+                        const widgetContainer = document.getElementById('telegram-login-btn');
+                        if (widgetContainer) {
+                            widgetContainer.innerHTML = '<p style="color: #c33;">Telegram Widget не загрузился</p>';
+                        }
+                        return;
+                    }
+
+                    console.log('[DEBUG] Telegram object found, calling Widget.Login');
+
+                    // Create script element dynamically with proper data attributes
+                    const script = document.createElement('script');
+                    script.async = true;
+                    script.src = 'https://telegram.org/js/telegram-widget.js?4';
+                    script.setAttribute('data-telegram-login', botUsername);
+                    script.setAttribute('data-size', 'large');
+                    script.setAttribute('data-radius', '8');
+                    script.setAttribute('data-request-access', 'write');
+                    script.setAttribute('data-userpic', 'true');
+
+                    // Define the callback function globally
+                    window.onTelegramAuth = async function(user) {
+                        console.log('[DEBUG] Telegram auth successful:', user);
+                        try {
+                            const response = await fetch('/api/auth/telegram', {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                },
+                                body: JSON.stringify(user)
+                            });
+
+                            const data = await response.json();
+
+                            if (response.ok) {
+                                localStorage.setItem('token', data.access_token);
+                                // Fetch user info to get role
+                                fetch('/api/auth/me', {
+                                    headers: { 'Authorization': `Bearer ${data.access_token}` }
+                                }).then(resp => resp.json()).then(userInfo => {
+                                    localStorage.setItem('username', userInfo.username);
+                                    localStorage.setItem('is_superadmin', userInfo.is_superadmin);
+                                    window.location.href = '/';
+                                }).catch(() => {
+                                    // Fallback
+                                    localStorage.setItem('username', user.first_name || user.username);
+                                    window.location.href = '/';
+                                });
+                            } else {
+                                showAlert('Ошибка авторизации: ' + (data.detail || 'неизвестная ошибка'), 'danger');
+                            }
+                        } catch (error) {
+                            showAlert('Ошибка соединения с сервером', 'danger');
+                            console.error('Telegram auth error:', error);
+                        }
+                    };
+
+                    script.setAttribute('data-onauth', 'onTelegramAuth(user)');
+
+                    const widgetContainer = document.getElementById('telegram-login-btn');
+                    if (widgetContainer) {
+                        widgetContainer.innerHTML = '';
+                        widgetContainer.appendChild(script);
+                        console.log('[DEBUG] Telegram Widget script added to container');
+                    } else {
+                        console.error('[ERROR] Widget container not found');
+                    }
+                }, 500);
+            });
+        } else {
+            // Hide Telegram widget if not configured
+            console.log('[DEBUG] Widget not configured, hiding');
+            const widgetContainer = document.getElementById('telegram-login-btn');
+            if (widgetContainer) {
+                widgetContainer.style.display = 'none';
             }
-        });
+        }
     </script>
 </body>
 </html>

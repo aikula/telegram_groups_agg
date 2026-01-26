@@ -47,6 +47,26 @@
                 <div class="stat-value" id="activeChats">-</div>
                 <div class="stat-label">Активных чатов</div>
             </div>
+            <div class="stat-card admin-only" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
+                <div class="stat-value" id="llmTokens">-</div>
+                <div class="stat-label">LLM токенов</div>
+            </div>
+            <div class="stat-card admin-only" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); color: white;">
+                <div class="stat-value" id="llmCost">-</div>
+                <div class="stat-label">Стоимость LLM ($)</div>
+            </div>
+        </div>
+
+        <!-- LLM Usage by Chat -->
+        <div class="card admin-only">
+            <div class="card-header">
+                <h2 class="card-title">🤖 Использование LLM по чатам</h2>
+            </div>
+            <div id="llmByChatContent">
+                <p style="text-align: center; color: var(--text-secondary); padding: 20px;">
+                    Загрузка данных...
+                </p>
+            </div>
         </div>
 
         <!-- Filters -->
@@ -124,7 +144,7 @@
         </div>
 
         <!-- Manual Actions -->
-        <div class="card">
+        <div class="card admin-only">
             <div class="card-header">
                 <h2 class="card-title">⚙️ Ручные действия</h2>
             </div>

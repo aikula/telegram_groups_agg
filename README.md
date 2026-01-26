@@ -25,6 +25,9 @@
 git clone <repo>
 cd telegram-bot-project
 
+# Создать Docker сеть (если используется Traefik или несколько контейнеров)
+docker network create telegram_chanel_agg_bot-network
+
 # Создать .env файл
 cp .env.example .env
 
@@ -205,11 +208,14 @@ curl -X POST -H "Authorization: Bearer token" \
 git clone <repo>
 cd telegram-bot-project
 
-# 2. Создать .env
+# 2. Создать Docker сеть (если ещё не создана)
+docker network create telegram_chanel_agg_bot-network
+
+# 3. Создать .env
 cp .env.example .env
 # Заполнить значения
 
-# 3. Запустить
+# 4. Запустить
 docker-compose up -d
 
 # 4. Проверить статус

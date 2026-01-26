@@ -6,23 +6,62 @@
 let activityChart = null;
 let chats = [];
 let currentToken = localStorage.getItem('token');
+let isSuperadmin = false;
 
 // Check authentication on load
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
     if (!currentToken) {
         window.location.href = '/login';
         return;
     }
 
-    // Set user info
-    const username = localStorage.getItem('username') || 'Admin';
-    document.getElementById('userName').textContent = username;
-    document.getElementById('userAvatar').textContent = username.charAt(0).toUpperCase();
+    // Get current user info
+    try {
+        const response = await fetch('/api/auth/me', {
+            headers: { 'Authorization': `Bearer ${currentToken}` }
+        });
+        if (response.ok) {
+            const user = await response.json();
+            isSuperadmin = user.is_superadmin;
+            localStorage.setItem('username', user.username);
+            localStorage.setItem('is_superadmin', user.is_superadmin);
+
+            // Set user info
+            document.getElementById('userName').textContent = user.username;
+            document.getElementById('userAvatar').textContent = user.username.charAt(0).toUpperCase();
+
+            // Add body class for CSS-based visibility control
+            if (isSuperadmin) {
+                document.body.classList.add('is-superadmin');
+            }
+
+            // Update page title
+            if (!isSuperadmin) {
+                document.title = 'Мои чаты - Telegram Chat Analytics';
+            }
+        } else {
+            throw new Error('Failed to get user info');
+        }
+    } catch (error) {
+        console.error('Error loading user info:', error);
+        // Fallback to localStorage
+        isSuperadmin = localStorage.getItem('is_superadmin') === 'true';
+        const username = localStorage.getItem('username') || 'User';
+        document.getElementById('userName').textContent = username;
+        document.getElementById('userAvatar').textContent = username.charAt(0).toUpperCase();
+
+        if (isSuperadmin) {
+            document.body.classList.add('is-superadmin');
+        }
+    }
 
     // Initialize
     initChart();
     loadChats();
     loadData();
+    if (isSuperadmin) {
+        loadLlmStats();
+    }
 });
 
 // ========== API Functions ==========
@@ -48,9 +87,15 @@ async function apiCall(endpoint, options = {}) {
 
 async function loadChats() {
     try {
-        const response = await apiCall('/api/chats?active_only=true');
-        const data = await response.json();
+        // Use /api/chats/my-chats for regular users, /api/chats for superadmins
+        const endpoint = isSuperadmin ? '/api/chats?active_only=true' : '/api/chats/my-chats?active_only=true';
+        const response = await apiCall(endpoint);
 
+        if (!response.ok) {
+            throw new Error('Failed to load chats');
+        }
+
+        const data = await response.json();
         chats = data;
 
         // Populate chat selects
@@ -65,7 +110,7 @@ async function loadChats() {
         summaryChatSelect.innerHTML = '<option value="">Выберите чат...</option>';
 
         chats.forEach(chat => {
-            const option = `<option value="${chat.chat_id}">${chat.chat_name}</option>`;
+            const option = `<option value="${chat.chat_id}">${chat.title}</option>`;
             chatSelect.innerHTML += option;
             summaryChatSelect.innerHTML += option;
         });
@@ -130,6 +175,120 @@ async function loadMessages(chatId, days) {
 
     // Update recent messages
     updateRecentMessages(data.messages.slice(0, 20));
+}
+
+// ========== LLM Stats ==========
+
+async function loadLlmStats() {
+    try {
+        const response = await apiCall('/api/stats/llm-usage?days=30');
+        const stats = await response.json();
+
+        // Update LLM stat cards
+        document.getElementById('llmTokens').textContent = formatNumber(stats.total_tokens);
+        document.getElementById('llmCost').textContent = '$' + stats.total_cost_usd.toFixed(4);
+
+        // Update LLM by chat section
+        updateLlmByChat(stats.by_chat, stats.by_skill);
+
+    } catch (error) {
+        console.error('Error loading LLM stats:', error);
+
+        // Show zeros on error
+        document.getElementById('llmTokens').textContent = '0';
+        document.getElementById('llmCost').textContent = '$0.0000';
+        document.getElementById('llmByChatContent').innerHTML =
+            '<p style="text-align: center; color: var(--text-secondary); padding: 20px;">Нет данных</p>';
+    }
+}
+
+function updateLlmByChat(byChat, bySkill) {
+    const container = document.getElementById('llmByChatContent');
+
+    if (!byChat || byChat.length === 0) {
+        container.innerHTML = '<p style="text-align: center; color: var(--text-secondary); padding: 20px;">Нет данных об использовании LLM</p>';
+        return;
+    }
+
+    // Create summary stats
+    let html = '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin-bottom: 20px;">';
+
+    // By chat section
+    html += '<div style="background: #f8f9fa; padding: 15px; border-radius: 8px;">';
+    html += '<h3 style="margin: 0 0 15px 0; font-size: 16px; color: #333;">📊 По чатам</h3>';
+    html += '<div style="max-height: 300px; overflow-y: auto;">';
+
+    byChat.forEach(chat => {
+        const chatName = getChatName(chat.chat_id);
+        html += `
+            <div style="padding: 10px; border-bottom: 1px solid #e0e0e0; display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    <div style="font-weight: 500;">${escapeHtml(chatName)}</div>
+                    <div style="font-size: 12px; color: #666;">
+                        Входящих: ${formatNumber(chat.tokens_prompt)} |
+                        Исходящих: ${formatNumber(chat.tokens_completion)}
+                    </div>
+                </div>
+                <div style="text-align: right;">
+                    <div style="font-weight: 500; color: #667eea;">${formatNumber(chat.tokens_total)}</div>
+                    <div style="font-size: 11px; color: #999;">токенов</div>
+                </div>
+            </div>
+        `;
+    });
+
+    html += '</div></div>';
+
+    // By skill section
+    html += '<div style="background: #f8f9fa; padding: 15px; border-radius: 8px;">';
+    html += '<h3 style="margin: 0 0 15px 0; font-size: 16px; color: #333;">⚡ По навыкам</h3>';
+    html += '<div style="max-height: 300px; overflow-y: auto;">';
+
+    bySkill.forEach(skill => {
+        const skillNames = {
+            'summary': '📊 Сводки',
+            'coach': '🎯 Коуч',
+            'thread_summary': '💬 Сводки тредов',
+            'qa': '❓ Вопрос-ответ',
+            'unknown': '❓ Неизвестно'
+        };
+        const skillName = skillNames[skill.skill] || skill.skill;
+
+        html += `
+            <div style="padding: 10px; border-bottom: 1px solid #e0e0e0; display: flex; justify-content: space-between; align-items: center;">
+                <div style="flex: 1;">
+                    <div style="font-weight: 500;">${skillName}</div>
+                    <div style="font-size: 12px; color: #666;">
+                        ${skill.requests} запросов
+                    </div>
+                </div>
+                <div style="text-align: right;">
+                    <div style="font-weight: 500; color: #764ba2;">${formatNumber(skill.tokens_total)}</div>
+                    <div style="font-size: 11px; color: #999;">токенов</div>
+                </div>
+            </div>
+        `;
+    });
+
+    html += '</div></div></div>';
+    container.innerHTML = html;
+}
+
+function getChatName(chatId) {
+    const chat = chats.find(c => c.chat_id === chatId);
+    if (chat) {
+        return chat.title || `Chat ${chatId}`;
+    }
+    return `Chat ${chatId}`;
+}
+
+function formatNumber(num) {
+    if (num >= 1000000) {
+        return (num / 1000000).toFixed(1) + 'M';
+    } else if (num >= 1000) {
+        return (num / 1000).toFixed(1) + 'K';
+    }
+    return num.toString();
 }
 
 // ========== Chart ==========
@@ -227,7 +386,7 @@ function updateRecentMessages(messages) {
 
     container.innerHTML = messages.map(msg => {
         const username = msg.username || msg.first_name || 'Unknown';
-        const text = msg.message_text || '[медиа]';
+        const text = msg.content || '[медиа]';
         const time = msg.timestamp ? new Date(msg.timestamp).toLocaleString('ru-RU') : '';
 
         return `

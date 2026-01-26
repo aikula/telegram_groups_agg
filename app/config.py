@@ -1,57 +1,141 @@
 """
-Configuration module - Load settings from .env
+Configuration module - Pydantic settings for v2.0
 """
 
+from pydantic import BaseModel, Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Optional
 import os
-from pathlib import Path
-from dotenv import load_dotenv
 
-# Load .env file if it exists (for local development)
-env_path = Path(__file__).parent.parent / ".env"
-if env_path.exists():
-    load_dotenv(env_path)
 
-class Settings:
-    """Application settings loaded from environment variables"""
+class Settings(BaseSettings):
+    """Application settings loaded from environment variables with Pydantic validation"""
 
-    def __init__(self):
-        """Load and validate settings from environment variables"""
-        # Telegram
-        self.telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore"
+    )
 
-        # OpenRouter / LLM
-        self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "")
-        self.openrouter_model = os.getenv("OPENROUTER_MODEL", "google/gemini-2.0-flash-exp")
+    # === Telegram ===
+    telegram_bot_token: str = Field(..., min_length=10)
+    telegram_bot_username: Optional[str] = Field(None, description="Bot username (without @) for Login Widget")
+    telegram_webhook_url: Optional[str] = Field(None, json_schema_extra={"example": "https://yourdomain.com/webhook/telegram"})
 
-        # Database
-        self.database_url = os.getenv("DATABASE_URL", "sqlite:///data/messages.db")
+    # === LLM (OpenAI-compatible API) ===
+    llm_base_url: str = Field(
+        default="https://openrouter.ai/api/v1",
+        json_schema_extra={"example": "https://openrouter.ai/api/v1"}
+    )
+    llm_api_key: str = Field(..., min_length=10)
+    llm_model_name: str = Field(default="anthropic/claude-3.5-sonnet")
+    llm_max_tokens: int = Field(default=4000, ge=100, le=32000)
+    llm_temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    llm_timeout: int = Field(default=60, ge=5, le=300)
 
-        # Web Server
-        self.web_host = os.getenv("WEB_HOST", "0.0.0.0")
-        self.web_port = int(os.getenv("WEB_PORT", 8000))
+    # === Security ===
+    encryption_master_key: str = Field(
+        ...,
+        description="Base64-encoded 32 bytes for AES-256 encryption. "
+                    "Generate with: python -c \"import secrets, base64; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())\""
+    )
+    jwt_secret_key: str = Field(
+        ...,
+        min_length=32,
+        description="Secret key for JWT tokens. Generate with: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+    )
+    jwt_algorithm: str = Field(default="HS256")
+    jwt_expire_minutes: int = Field(default=10080, ge=1, description="Token expiration in minutes (default: 7 days)")
+    superadmin_password_hash: Optional[str] = Field(
+        None,
+        description="Bcrypt hash of superadmin password. "
+                   "Generate with: python -c \"from app.web.auth import hash_password; print(hash_password('YOUR_PASSWORD'))\""
+    )
+    superadmin_username: str = Field(default="superadmin", description="Superadmin username")
 
-        # Admin Credentials
-        self.admin_username = os.getenv("ADMIN_USERNAME", "admin")
-        self.admin_password = os.getenv("ADMIN_PASSWORD", "")
+    # === Database ===
+    database_url: str = Field(default="sqlite+aiosqlite:///./data/chat_data.db")
+    database_path: str = Field(default="data/chat_data.db")
 
-        # Bot Settings
-        self.context_messages = int(os.getenv("CONTEXT_MESSAGES", 10))
-        self.summary_time = os.getenv("SUMMARY_TIME", "16:00")
-        self.summary_days = int(os.getenv("SUMMARY_DAYS", 7))
-        self.timezone = os.getenv("TIMEZONE", "Europe/Moscow")
+    # === Features ===
+    retention_days: int = Field(default=90, ge=1, le=3650)
+    summary_time_utc: str = Field(default="13:00", pattern=r"^\d{2}:\d{2}$")
+    default_language: str = Field(default="ru")
+    context_messages: int = Field(default=20, ge=1, le=100)
 
-        # Logging
-        self.log_level = os.getenv("LOG_LEVEL", "INFO")
+    # === Rate Limiting ===
+    telegram_global_rate: int = Field(default=30, ge=1, description="Messages per second globally")
+    telegram_per_chat_rate: float = Field(default=1.0, ge=0.1, description="Messages per second per chat")
+    api_rate_limit: str = Field(default="10/minute")
 
-        # JWT
-        self.jwt_secret = os.getenv("JWT_SECRET", "telegram-analytics-secret-key-change-in-production")
+    # === Server ===
+    host: str = Field(default="0.0.0.0")
+    port: int = Field(default=8000, ge=1, le=65535)
+    debug: bool = Field(default=False)
+    base_url: str = Field(default="https://tghub.kulinich.ru", description="Base URL for OTP login messages")
 
-        # Validate required settings
-        if not self.telegram_bot_token:
-            raise ValueError("TELEGRAM_BOT_TOKEN not set in environment")
-        if not self.openrouter_api_key:
-            raise ValueError("OPENROUTER_API_KEY not set in environment")
-        if not self.admin_password:
-            raise ValueError("ADMIN_PASSWORD not set in environment")
+    # === Admin (v1.0 compatibility, deprecated) ===
+    admin_username: Optional[str] = Field(None, deprecated="Use superadmin_password_hash instead")
+    admin_password: Optional[str] = Field(None, deprecated="Use superadmin_password_hash instead")
 
-settings = Settings()
+    @field_validator("encryption_master_key")
+    @classmethod
+    def validate_master_key(cls, v: str) -> str:
+        """Validate that master key is valid base64"""
+        import base64
+        try:
+            decoded = base64.urlsafe_b64decode(v)
+            if len(decoded) < 32:
+                raise ValueError("Master key must be at least 32 bytes when decoded")
+        except Exception as e:
+            raise ValueError(f"Invalid base64 master key: {e}")
+        return v
+
+    @field_validator("summary_time_utc")
+    @classmethod
+    def validate_time_format(cls, v: str) -> str:
+        """Validate HH:MM format"""
+        hours, minutes = v.split(":")
+        if not (0 <= int(hours) <= 23):
+            raise ValueError("Hour must be between 00 and 23")
+        if not (0 <= int(minutes) <= 59):
+            raise ValueError("Minute must be between 00 and 59")
+        return v
+
+    @field_validator("default_language")
+    @classmethod
+    def validate_language(cls, v: str) -> str:
+        """Validate supported language"""
+        supported = {"ru", "en"}
+        if v not in supported:
+            raise ValueError(f"Language must be one of: {supported}")
+        return v
+
+    def get_model_config(self) -> dict:
+        """Get model configuration for LLM client"""
+        return {
+            "base_url": self.llm_base_url,
+            "api_key": self.llm_api_key,
+            "model_name": self.llm_model_name,
+            "max_tokens": self.llm_max_tokens,
+            "temperature": self.llm_temperature,
+            "timeout": self.llm_timeout,
+        }
+
+
+# Lazy singleton instance
+_settings: Settings | None = None
+
+
+def get_settings() -> Settings:
+    """Get settings singleton instance (lazy initialization)"""
+    global _settings
+    if _settings is None:
+        _settings = Settings()
+    return _settings
+
+
+# Create settings singleton for backward compatibility
+# Note: In tests, conftest.py sets env vars before this import
+settings = get_settings()

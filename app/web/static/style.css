@@ -19,6 +19,16 @@
     --transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
 }
 
+/* Admin-only elements (hidden by default for non-superadmin users) */
+.admin-only {
+    display: none;
+}
+
+/* Show admin-only elements when body has 'is-superadmin' class */
+body.is-superadmin .admin-only {
+    display: block;
+}
+
 * {
     margin: 0;
     padding: 0;

@@ -1,17 +1,25 @@
 """
-FastAPI Web Application - Main web server for analytics dashboard
+FastAPI Web Application - Main web server for analytics dashboard (v2.0)
 """
 
 import logging
-import os
 from pathlib import Path
-from fastapi import FastAPI, Request
+from typing import Optional
+
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
+from app.config import settings
+from app.core.db import get_database
+from app.bot.bot import get_bot
+
 logger = logging.getLogger(__name__)
+
+# Singleton instance
+_app: Optional[FastAPI] = None
 
 
 @asynccontextmanager
@@ -22,21 +30,61 @@ async def lifespan(app: FastAPI):
     Args:
         app: FastAPI application instance
     """
+    # Import auth module here to avoid circular dependency
+    from app.web.auth import create_default_admin
+
     # Startup
     logger.info("FastAPI application starting...")
+
+    # Initialize database
+    db = get_database()
+    await db.init_database()
+
+    # Create default superadmin if password hash is set
+    if settings.superadmin_password_hash:
+        await create_default_admin(
+            db,
+            username="superadmin",
+            password_hash=settings.superadmin_password_hash
+        )
+
     yield
+
     # Shutdown
     logger.info("FastAPI application shutting down...")
 
 
-def create_app(db, bot_instance=None, config=None):
+def get_app() -> FastAPI:
+    """
+    Get FastAPI application singleton.
+
+    Returns:
+        FastAPI application instance
+    """
+    global _app
+    if _app is None:
+        _app = _create_app()
+    return _app
+
+
+def get_app_state() -> dict:
+    """
+    Get application state.
+
+    Returns:
+        Application state dictionary
+    """
+    app = get_app()
+    return {
+        "db": app.state.db,
+        "auth_manager": app.state.auth_manager,
+        "bot": app.state.bot,
+    }
+
+
+def _create_app() -> FastAPI:
     """
     Create and configure the FastAPI application.
-
-    Args:
-        db: Database instance
-        bot_instance: Optional TelegramBot instance for manual summaries
-        config: Optional application configuration
 
     Returns:
         Configured FastAPI application
@@ -44,13 +92,16 @@ def create_app(db, bot_instance=None, config=None):
     # Create FastAPI app
     app = FastAPI(
         title="Telegram Chat Analytics",
-        description="Analytics dashboard for Telegram chat messages",
-        version="1.0.0",
-        lifespan=lifespan
+        description="Analytics dashboard for Telegram chat messages (v2.0)",
+        version="2.0.0",
+        lifespan=lifespan,
+        docs_url="/api/docs",
+        redoc_url="/api/redoc",
     )
 
     # Get static files directory
     static_dir = Path(__file__).parent / "static"
+    templates_dir = Path(__file__).parent / "templates"
 
     # Setup CORS
     app.add_middleware(
@@ -62,27 +113,45 @@ def create_app(db, bot_instance=None, config=None):
     )
 
     # Import and setup auth
-    from app.web.auth import create_auth_manager, create_default_admin
-    from app.web.routes import create_routes, setup_error_handlers
+    from app.web.auth import AuthManager, create_default_admin
 
-    # Create auth manager
-    secret_key = getattr(config, 'jwt_secret', None) if config else None
-    auth_manager = create_auth_manager(db, secret_key=secret_key)
+    # Create database instance
+    db = get_database()
 
-    # Create default admin if not exists
-    if config:
-        create_default_admin(
-            db,
-            username=config.admin_username,
-            password=config.admin_password
-        )
+    # Create auth manager with JWT secret from config
+    auth_manager = AuthManager(
+        db=db,
+        secret_key=settings.jwt_secret_key,
+        algorithm=settings.jwt_algorithm,
+        expire_minutes=settings.jwt_expire_minutes
+    )
+
+    # Create default superadmin if password hash is set
+    # Note: This will be handled during lifespan startup
+
+    # Store dependencies in app state
+    app.state.db = db
+    app.state.auth_manager = auth_manager
+    app.state.bot = None  # Will be set when bot starts
 
     # Setup routes
-    api_router = create_routes(db, auth_manager, bot_instance)
-    app.include_router(api_router)
+    from app.web.routes import auth, stats, chats, messages, export, health, webhook, admin
+    from app.web.middleware import auth_required
+
+    # Include routers
+    app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
+    app.include_router(stats.router, prefix="/api/stats", tags=["Statistics"], dependencies=[auth_required])
+    app.include_router(chats.router, prefix="/api/chats", tags=["Chats"], dependencies=[auth_required])
+    app.include_router(messages.router, prefix="/api/messages", tags=["Messages"], dependencies=[auth_required])
+    app.include_router(export.router, prefix="/api/export", tags=["Export"], dependencies=[auth_required])
+    app.include_router(admin.router, prefix="/api/admin", tags=["Admin"], dependencies=[auth_required])
+    app.include_router(health.router, prefix="/api", tags=["Health"])
+
+    # Webhook route (no auth required, validated by Telegram)
+    app.include_router(webhook.router, prefix="/webhook", tags=["Webhook"])
 
     # Setup error handlers
-    setup_error_handlers(app)
+    _setup_error_handlers(app)
 
     # Mount static files
     if static_dir.exists():
@@ -100,10 +169,34 @@ def create_app(db, bot_instance=None, config=None):
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_page():
-        """Serve the login page."""
+        """Serve the login page with bot username injected."""
         login_path = static_dir / "login.html"
         if login_path.exists():
-            return FileResponse(str(login_path))
+            bot_username = settings.telegram_bot_username
+
+            with open(login_path, "r", encoding="utf-8") as f:
+                html_content = f.read()
+
+            if not bot_username:
+                # Hide Telegram widget section if not configured
+                html_content = html_content.replace(
+                    '<div id="telegram-login-btn"',
+                    '<div id="telegram-login-btn" style="display: none;"'
+                )
+            else:
+                # Replace bot username - widget needs it WITHOUT @ prefix
+                # Remove @ if user included it
+                clean_username = bot_username.lstrip('@')
+                html_content = html_content.replace("'YOUR_BOT_USERNAME'", f"'{clean_username}'")
+
+            # Add cache busting headers
+            headers = {
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0"
+            }
+
+            return HTMLResponse(content=html_content, headers=headers)
         return HTMLResponse("<h1>Login page not found.</h1>")
 
     # ========== API Documentation ==========
@@ -113,55 +206,89 @@ def create_app(db, bot_instance=None, config=None):
         """API information endpoint."""
         return {
             "name": "Telegram Chat Analytics API",
-            "version": "1.0.0",
+            "version": "2.0.0",
             "endpoints": {
-                "auth": "/api/auth/login",
-                "stats": "/api/stats/messages",
+                "auth": "/api/auth",
+                "stats": "/api/stats",
                 "chats": "/api/chats",
                 "messages": "/api/messages",
-                "export": "/api/export/csv",
-                "summary": "/api/summary/manual",
-                "health": "/api/health"
+                "export": "/api/export",
+                "health": "/api/health",
+                "webhook": "/webhook/telegram",
+                "docs": "/api/docs"
             }
         }
-
-    # Store dependencies for access in routes
-    app.state.db = db
-    app.state.auth_manager = auth_manager
-    app.state.bot = bot_instance
 
     logger.info("FastAPI application created successfully")
 
     return app
 
 
-# For development/testing
-async def create_dev_app():
+def _setup_error_handlers(app: FastAPI) -> None:
     """
-    Create a development app with in-memory database.
+    Setup global error handlers for the FastAPI app.
 
-    Only for testing purposes.
+    Args:
+        app: FastAPI application instance
     """
-    from app.database import Database
 
-    # Create temporary database
-    db = Database(":memory:")
-    db.init()
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(request: Request, exc: HTTPException):
+        """Handle HTTP exceptions."""
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": exc.detail}
+        )
 
-    # Create test admin
-    from app.web.auth import create_default_admin
-    create_default_admin(db, "admin", "password")
+    @app.exception_handler(Exception)
+    async def general_exception_handler(request: Request, exc: Exception):
+        """Handle general exceptions."""
+        logger.error(f"Unhandled exception: {exc}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Internal server error"}
+        )
 
-    return create_app(db=db)
+
+async def set_webhook(bot_instance, webhook_url: str) -> bool:
+    """
+    Set Telegram bot webhook.
+
+    Args:
+        bot_instance: Bot instance
+        webhook_url: Webhook URL
+
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        from aiogram.types import WebhookInfo
+
+        webhook_info = WebhookInfo(url=webhook_url)
+        await bot_instance.set_webhook(webhook_info)
+        logger.info(f"Webhook set to: {webhook_url}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error setting webhook: {e}")
+        return False
 
 
-if __name__ == "__main__":
-    import uvicorn
+async def delete_webhook(bot_instance) -> bool:
+    """
+    Delete Telegram bot webhook.
 
-    # For direct running (development only)
-    async def main():
-        app = await create_dev_app()
-        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    Args:
+        bot_instance: Bot instance
 
-    import asyncio
-    asyncio.run(main())
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        await bot_instance.delete_webhook()
+        logger.info("Webhook deleted")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error deleting webhook: {e}")
+        return False

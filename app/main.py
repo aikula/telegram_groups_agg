@@ -1,5 +1,6 @@
 """
 Telegram Chat Analytics Bot - Main Entry Point
+Uses aiogram 3.4+ for Telegram bot integration
 """
 
 import asyncio
@@ -17,56 +18,81 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 async def main():
     """Main entry point for the application"""
+    shutdown_func = None
+
     try:
         logger.info("Starting Telegram Chat Analytics Bot...")
-        
+
         # Import after adding to path
         from app.config import settings
-        from app.database import Database
-        from app.bot.telegram_bot import TelegramBot
-        from app.web.app import create_app
+        from app.bot.bot import (
+            get_bot,
+            get_dispatcher,
+            startup,
+            shutdown,
+            register_handlers,
+            register_middleware
+        )
+        from app.web.app import get_app
         import uvicorn
-        
-        # Initialize database
-        logger.info("Initializing database...")
-        db = Database(settings.database_url.replace('sqlite:///', ''))
-        db.init()
-        
-        # Create Telegram bot
-        logger.info("Creating Telegram bot...")
-        bot = TelegramBot(token=settings.telegram_bot_token, db=db, config=settings)
-        
+
+        # Store shutdown function
+        shutdown_func = shutdown
+
+        # Setup bot dispatcher
+        bot = get_bot()
+        dispatcher = get_dispatcher()
+
+        # Register handlers and middleware
+        register_handlers(dispatcher)
+        register_middleware(dispatcher)
+
         # Create FastAPI app
         logger.info("Creating FastAPI app...")
-        app = create_app(db=db, config=settings)
-        
+        web_app = get_app()
+
+        # Store bot in app state for webhook access
+        web_app.state.bot = bot
+        web_app.state.dispatcher = dispatcher
+        logger.info("Bot instance stored in app state for webhook")
+
+        # Run bot startup
+        await startup()
+
         # Run bot and web server
-        logger.info(f"Starting services on {settings.web_host}:{settings.web_port}")
-        
-        # Create tasks
-        bot_task = asyncio.create_task(bot.run_polling())
-        
+        logger.info(f"Starting services on {settings.host}:{settings.port}")
+
+        # Bot will receive updates via webhook, not polling
+        # The webhook endpoint is at /webhook/telegram
+
         config = uvicorn.Config(
-            app=app,
-            host=settings.web_host,
-            port=settings.web_port,
+            app=web_app,
+            host=settings.host,
+            port=settings.port,
             log_level="info"
         )
         server = uvicorn.Server(config)
         server_task = asyncio.create_task(server.serve())
-        
+
         logger.info("✅ All services started successfully!")
-        
-        # Wait for tasks
-        await asyncio.gather(bot_task, server_task)
-        
+        logger.info("📡 Webhook mode: Bot will receive updates via /webhook/telegram")
+
+        # Wait for server (webhook will handle bot updates)
+        await server_task
+
     except KeyboardInterrupt:
         logger.info("Shutting down...")
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
         raise
+    finally:
+        # Run shutdown if available
+        if shutdown_func:
+            await shutdown_func()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

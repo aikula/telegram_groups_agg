@@ -1,322 +1,261 @@
 """
-Bot Scheduler - Scheduled tasks for daily summaries and reports
+Bot scheduler - APScheduler for background tasks
+
+Features:
+- Daily summary generation at configured time
+- AsyncIOScheduler integration with aiogram
+- Job management (add, remove, list)
 """
 
 import logging
 from datetime import datetime, time
 from typing import Optional
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from pytz import timezone as pytz_timezone
-from app.bot.utils import format_summary_message, truncate_text
+
+from app.core.db import get_database
+from app.core.llm import get_llm_client
+from app.bot.bot import get_bot
+from app.core.i18n import get_text
+
 
 logger = logging.getLogger(__name__)
 
 
-class BotScheduler:
+# Singleton instance
+_scheduler: Optional[AsyncIOScheduler] = None
+
+
+def get_scheduler() -> AsyncIOScheduler:
     """
-    Scheduler for automated bot tasks.
+    Get scheduler singleton instance.
 
-    Handles:
-    - Daily summary generation at configured time
-    - Coaching recommendations
+    Returns:
+        AsyncIOScheduler instance
     """
+    global _scheduler
+    if _scheduler is None:
+        _scheduler = AsyncIOScheduler(timezone=pytz_timezone("Europe/Moscow"))
+        logger.info("Scheduler instance created")
+    return _scheduler
 
-    def __init__(self, db, llm_client, bot, config):
-        """
-        Initialize the scheduler.
 
-        Args:
-            db: Database instance
-            llm_client: OpenRouter LLM client
-            bot: Telegram Bot Application instance
-            config: Application configuration (Settings object)
-        """
-        self.db = db
-        self.llm_client = llm_client
-        self.bot = bot
-        self.config = config
+async def start_scheduler() -> None:
+    """
+    Start the scheduler and register jobs.
 
-        # Parse timezone
-        self.timezone = pytz_timezone(config.timezone)
+    Initializes all scheduled tasks.
+    """
+    scheduler = get_scheduler()
 
-        # Create scheduler
-        self.scheduler = AsyncIOScheduler(timezone=self.timezone)
+    if scheduler.running:
+        logger.warning("Scheduler already running")
+        return
 
-        logger.info(f"Scheduler initialized with timezone: {config.timezone}")
+    # Add jobs
+    _add_daily_summary_job(scheduler)
 
-    def start(self):
-        """
-        Start the scheduler and add all jobs.
-        """
-        try:
-            # Add daily summary job
-            self._add_daily_summary_job()
+    # Start scheduler
+    scheduler.start()
+    logger.info("Scheduler started")
 
-            # Start the scheduler
-            self.scheduler.start()
-            logger.info("Scheduler started successfully")
 
-        except Exception as e:
-            logger.error(f"Error starting scheduler: {e}", exc_info=True)
-            raise
+async def stop_scheduler() -> None:
+    """
+    Stop the scheduler gracefully.
 
-    def shutdown(self):
-        """
-        Shutdown the scheduler gracefully.
-        """
-        if self.scheduler.running:
-            self.scheduler.shutdown(wait=True)
-            logger.info("Scheduler shutdown complete")
+    Shuts down all jobs and closes scheduler.
+    """
+    global _scheduler
 
-    def _add_daily_summary_job(self):
-        """
-        Add the daily summary job to the scheduler.
-        """
-        # Parse the summary time from config (format: "HH:MM")
-        try:
-            hour, minute = self._parse_time(self.config.summary_time)
-        except ValueError as e:
-            logger.warning(f"Invalid summary time format: {self.config.summary_time}, using default 16:00")
-            hour, minute = 16, 0
+    if _scheduler is None:
+        return
 
-        # Create cron trigger for daily execution
-        trigger = CronTrigger(hour=hour, minute=minute, timezone=self.timezone)
+    if _scheduler.running:
+        _scheduler.shutdown(wait=True)
+        logger.info("Scheduler stopped")
 
-        # Add job
-        self.scheduler.add_job(
-            self._generate_all_summaries,
-            trigger=trigger,
-            id='daily_summary',
-            name='Daily Chat Summary',
-            replace_existing=True
-        )
+    _scheduler = None
 
-        logger.info(f"Daily summary job scheduled for {hour:02d}:{minute:02d} {self.config.timezone}")
 
-    def _parse_time(self, time_str: str) -> tuple:
-        """
-        Parse time string in "HH:MM" format.
+def _add_daily_summary_job(scheduler: AsyncIOScheduler) -> None:
+    """
+    Add daily summary generation job.
 
-        Args:
-            time_str: Time string
+    Runs at 16:00 Moscow time by default.
+    """
+    trigger = CronTrigger(hour=16, minute=0, timezone=pytz_timezone("Europe/Moscow"))
 
-        Returns:
-            Tuple of (hour, minute)
+    scheduler.add_job(
+        _generate_daily_summaries,
+        trigger=trigger,
+        id="daily_summary",
+        name="Daily Chat Summary",
+        replace_existing=True
+    )
 
-        Raises:
-            ValueError: If format is invalid
-        """
-        try:
-            parts = time_str.split(":")
-            if len(parts) != 2:
-                raise ValueError("Time must be in HH:MM format")
-            hour = int(parts[0])
-            minute = int(parts[1])
-            if not (0 <= hour <= 23 and 0 <= minute <= 59):
-                raise ValueError("Invalid hour or minute")
-            return hour, minute
-        except (ValueError, AttributeError) as e:
-            raise ValueError(f"Invalid time format: {time_str}") from e
+    logger.info("Daily summary job scheduled for 16:00 Moscow time")
 
-    async def _generate_all_summaries(self):
-        """
-        Generate and send daily summaries for all active chats.
 
-        This is the main job function called by the scheduler.
-        """
-        logger.info("Starting daily summary generation...")
+async def _generate_daily_summaries() -> None:
+    """
+    Generate and send daily summaries for all active chats.
 
-        try:
-            # Get all active chats
-            chats = self.db.get_chats(active_only=True)
+    This job runs automatically at the scheduled time.
+    """
+    logger.info("Starting daily summary generation...")
 
-            if not chats:
-                logger.info("No active chats found")
-                return
+    db = get_database()
+    bot = get_bot()
 
-            logger.info(f"Found {len(chats)} active chats")
+    try:
+        # Get all chats with summary enabled
+        async with db.get_connection() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT c.id, c.title, cs.language
+                FROM chats c
+                LEFT JOIN chat_settings cs ON c.id = cs.chat_id
+                WHERE c.deleted_at IS NULL
+                AND (cs.summary_enabled IS NULL OR cs.summary_enabled = 1)
+                """
+            )
+            chats = await cursor.fetchall()
 
-            # Generate summary for each chat
-            for chat in chats:
-                chat_id = chat.get('chat_id')
-                chat_name = chat.get('chat_name', f'chat_{chat_id}')
-
-                try:
-                    await self._generate_and_send_summary(chat_id, chat_name)
-
-                except Exception as e:
-                    logger.error(f"Error generating summary for chat {chat_id}: {e}", exc_info=True)
-
-            logger.info("Daily summary generation complete")
-
-        except Exception as e:
-            logger.error(f"Error in daily summary job: {e}", exc_info=True)
-
-    async def _generate_and_send_summary(self, chat_id: int, chat_name: str):
-        """
-        Generate and send summary for a specific chat.
-
-        Args:
-            chat_id: Telegram chat ID
-            chat_name: Chat display name
-        """
-        logger.info(f"Generating summary for chat {chat_name} ({chat_id})")
-
-        # Get messages from the configured number of days
-        messages = self.db.get_messages(
-            chat_id=chat_id,
-            days=self.config.summary_days,
-            exclude_deleted=True
-        )
-
-        if not messages:
-            logger.info(f"No messages found for chat {chat_id} in last {self.config.summary_days} days")
+        if not chats:
+            logger.info("No chats found with summary enabled")
             return
 
-        logger.info(f"Found {len(messages)} messages for chat {chat_id}")
+        logger.info(f"Found {len(chats)} chats with summary enabled")
 
-        # Generate summary
-        summary = self.llm_client.generate_summary(messages=messages, language="ru")
-
-        # Generate recommendations
-        recommendations = self.llm_client.generate_recommendations(messages=messages, language="ru")
-
-        # Format the message
-        message_text = format_summary_message(summary, recommendations)
-
-        # Truncate if too long
-        message_text = truncate_text(message_text, max_length=4000)
-
-        # Send to chat
-        try:
-            await self.bot.bot.send_message(
-                chat_id=chat_id,
-                text=message_text,
-                parse_mode="Markdown"
-            )
-            logger.info(f"Summary sent to chat {chat_id}")
-
-        except Exception as e:
-            logger.error(f"Error sending summary to chat {chat_id}: {e}", exc_info=True)
-
-            # Try without markdown if there was a parse error
+        for chat_id, title, language in chats:
             try:
-                plain_message = format_summary_message(summary, recommendations).replace("*", "")
-                await self.bot.bot.send_message(
-                    chat_id=chat_id,
-                    text=plain_message
-                )
-                logger.info(f"Plain text summary sent to chat {chat_id}")
+                await _generate_and_send_summary(db, bot, chat_id, title, language or "ru")
+            except Exception as e:
+                logger.error(f"Error generating summary for chat {chat_id}: {e}")
 
-            except Exception as e2:
-                logger.error(f"Error sending plain summary to chat {chat_id}: {e2}", exc_info=True)
+        logger.info("Daily summary generation complete")
 
-    async def generate_manual_summary(self, chat_id: int) -> dict:
-        """
-        Manually generate summary for a specific chat.
-
-        Args:
-            chat_id: Telegram chat ID
-
-        Returns:
-            Dictionary with 'summary' and 'recommendations' keys
-        """
-        logger.info(f"Generating manual summary for chat {chat_id}")
-
-        # Get messages
-        messages = self.db.get_messages(
-            chat_id=chat_id,
-            days=self.config.summary_days,
-            exclude_deleted=True
-        )
-
-        if not messages:
-            return {
-                "summary": "Нет сообщений за указанный период.",
-                "recommendations": "Недостаточно данных для анализа."
-            }
-
-        # Generate summary and recommendations
-        summary = self.llm_client.generate_summary(messages=messages, language="ru")
-        recommendations = self.llm_client.generate_recommendations(messages=messages, language="ru")
-
-        return {
-            "summary": summary,
-            "recommendations": recommendations
-        }
-
-    async def send_manual_summary(self, chat_id: int) -> bool:
-        """
-        Manually trigger summary generation and sending for a specific chat.
-
-        Args:
-            chat_id: Telegram chat ID
-
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            # Get chat info
-            chats = self.db.get_chats(active_only=True)
-            chat = next((c for c in chats if c.get('chat_id') == chat_id), None)
-
-            chat_name = chat.get('chat_name', f'chat_{chat_id}') if chat else f'chat_{chat_id}'
-
-            # Generate and send
-            await self._generate_and_send_summary(chat_id, chat_name)
-            return True
-
-        except Exception as e:
-            logger.error(f"Error sending manual summary for chat {chat_id}: {e}", exc_info=True)
-            return False
-
-    def get_next_run_time(self) -> Optional[datetime]:
-        """
-        Get the next scheduled run time for the daily summary.
-
-        Returns:
-            Next run datetime or None if not scheduled
-        """
-        job = self.scheduler.get_job('daily_summary')
-        if job:
-            return job.next_run_time
-        return None
-
-    def get_jobs(self) -> list:
-        """
-        Get all scheduled jobs.
-
-        Returns:
-            List of job dictionaries
-        """
-        jobs = []
-        for job in self.scheduler.get_jobs():
-            jobs.append({
-                "id": job.id,
-                "name": job.name,
-                "next_run_time": job.next_run_time,
-                "trigger": str(job.trigger)
-            })
-        return jobs
+    except Exception as e:
+        logger.error(f"Error in daily summary job: {e}")
 
 
-def create_scheduler(db, llm_client, bot, config):
+async def _generate_and_send_summary(
+    db,
+    bot,
+    chat_id: int,
+    title: str,
+    language: str
+) -> None:
     """
-    Factory function to create a BotScheduler instance.
+    Generate and send summary for a specific chat.
 
     Args:
         db: Database instance
-        llm_client: OpenRouter LLM client
-        bot: Telegram Bot Application instance
-        config: Application configuration
+        bot: Bot instance
+        chat_id: Telegram chat ID
+        title: Chat title
+        language: Chat language
+    """
+    logger.info(f"Generating summary for chat {title} ({chat_id})")
+
+    # Get messages from last 24 hours
+    messages = await db.get_recent_messages(chat_id, limit=100, hours=24)
+
+    if not messages:
+        logger.info(f"No messages found for chat {chat_id} in last 24 hours")
+        return
+
+    logger.info(f"Found {len(messages)} messages for chat {chat_id}")
+
+    # Format context
+    context_text = "\n".join([
+        f"[{msg.get('timestamp', '')}] {msg.get('username', 'User')}: {msg.get('content', '')}"
+        for msg in messages
+    ])
+
+    # Generate summary
+    llm = get_llm_client()
+
+    try:
+        result = await llm.generate(
+            get_text(
+                "summary.prompt",
+                lang=language,
+                messages=context_text
+            )
+        )
+
+        # Send summary
+        await bot.send_message(chat_id, result["text"])
+
+        # Log usage
+        await db.log_llm_usage(
+            user_id=0,  # System message
+            chat_id=chat_id,
+            skill="summary",
+            tokens_prompt=result["usage"]["prompt_tokens"],
+            tokens_completion=result["usage"]["completion_tokens"],
+            cost_usd=result.get("cost_usd", 0.0)
+        )
+
+        logger.info(f"Summary sent to chat {chat_id}")
+
+    except Exception as e:
+        logger.error(f"Error generating/sending summary for chat {chat_id}: {e}")
+
+
+async def trigger_manual_summary(chat_id: int) -> bool:
+    """
+    Manually trigger summary generation for a specific chat.
+
+    Args:
+        chat_id: Telegram chat ID
 
     Returns:
-        BotScheduler instance
+        True if successful, False otherwise
     """
-    return BotScheduler(
-        db=db,
-        llm_client=llm_client,
-        bot=bot,
-        config=config
-    )
+    db = get_database()
+    bot = get_bot()
+
+    try:
+        # Get chat info
+        async with db.get_connection() as conn:
+            cursor = await conn.execute(
+                "SELECT title FROM chats WHERE id = ?", (chat_id,)
+            )
+            row = await cursor.fetchone()
+            title = row[0] if row else f"chat_{chat_id}"
+
+        # Get chat language
+        settings = await db.get_chat_settings(chat_id)
+        language = settings.get("language", "ru") if settings else "ru"
+
+        await _generate_and_send_summary(db, bot, chat_id, title, language)
+        return True
+
+    except Exception as e:
+        logger.error(f"Error in manual summary for chat {chat_id}: {e}")
+        return False
+
+
+def get_scheduled_jobs() -> list:
+    """
+    Get list of all scheduled jobs.
+
+    Returns:
+        List of job info dictionaries
+    """
+    scheduler = get_scheduler()
+
+    jobs = []
+    for job in scheduler.get_jobs():
+        jobs.append({
+            "id": job.id,
+            "name": job.name,
+            "next_run_time": job.next_run_time,
+        })
+
+    return jobs

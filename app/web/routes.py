@@ -5,7 +5,7 @@ API Routes - FastAPI route handlers for the web interface
 import logging
 import csv
 import io
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from fastapi import APIRouter, HTTPException, Depends, Header, Query, Body
 from fastapi.security import OAuth2PasswordRequestForm
@@ -124,7 +124,7 @@ def create_routes(db, auth_manager, bot_instance=None):
             chat_id: Filter by specific chat (optional)
             days: Number of days to analyze (default: 7, max: 365)
         """
-        messages = db.get_messages(chat_id=chat_id, days=days, exclude_deleted=True)
+        messages = await db.get_messages(chat_id=chat_id, days=days, exclude_deleted=True)
 
         if not messages:
             return MessageStatsResponse(
@@ -195,7 +195,7 @@ def create_routes(db, auth_manager, bot_instance=None):
         Query params:
             active_only: Only return active chats (default: true)
         """
-        chats = db.get_chats(active_only=active_only)
+        chats = await db.get_chats(active_only=active_only)
 
         return [
             ChatInfo(
@@ -226,7 +226,7 @@ def create_routes(db, auth_manager, bot_instance=None):
             limit: Maximum messages to return (default: 100)
             offset: Number of messages to skip (default: 0)
         """
-        messages = db.get_messages(chat_id=chat_id, days=days, exclude_deleted=True)
+        messages = await db.get_messages(chat_id=chat_id, days=days, exclude_deleted=True)
 
         # Apply pagination
         total = len(messages)
@@ -254,7 +254,7 @@ def create_routes(db, auth_manager, bot_instance=None):
             chat_id: Filter by specific chat (optional)
             days: Number of days to export (default: 7)
         """
-        messages = db.get_messages(chat_id=chat_id, days=days, exclude_deleted=True)
+        messages = await db.get_messages(chat_id=chat_id, days=days, exclude_deleted=True)
 
         # Create CSV in memory
         output = io.StringIO()
@@ -310,7 +310,7 @@ def create_routes(db, auth_manager, bot_instance=None):
 
         try:
             # Get messages for the specified days
-            messages = bot_instance.db.get_messages(
+            messages = await bot_instance.db.get_messages(
                 chat_id=chat_id,
                 days=days,
                 exclude_deleted=True
@@ -352,7 +352,7 @@ def create_routes(db, auth_manager, bot_instance=None):
 
         try:
             # Get messages for the specified days
-            messages = bot_instance.db.get_messages(
+            messages = await bot_instance.db.get_messages(
                 chat_id=chat_id,
                 days=days,
                 exclude_deleted=True
@@ -398,30 +398,23 @@ def create_routes(db, auth_manager, bot_instance=None):
             chat_id: Telegram chat ID
             days: Number of days to analyze (default: 7, max: 365)
         """
-        if not bot_instance:
-            raise HTTPException(status_code=503, detail="Bot not available")
-
         try:
-            messages = db.get_messages(chat_id=chat_id, days=days, exclude_deleted=True)
+            # Use CoachSkill for recommendations
+            from app.skills.coach import CoachSkill
 
-            if not messages:
-                return SummaryResponse(
-                    summary="",
-                    recommendations=f"Нет сообщений за последние {days} дней."
-                )
-
-            from app.llm.openrouter import create_openrouter_client
-
-            llm_client = create_openrouter_client(
-                api_key=bot_instance.config.openrouter_api_key,
-                model=bot_instance.config.openrouter_model
+            coach_skill = CoachSkill(db)
+            result = await coach_skill.suggest_improvements(
+                chat_id=chat_id,
+                days=days,
+                language="ru"
             )
 
-            recommendations = llm_client.generate_recommendations(messages, language="ru")
+            if not result.success:
+                raise HTTPException(status_code=500, detail=result.error or "Failed to generate recommendations")
 
             return SummaryResponse(
                 summary="",
-                recommendations=recommendations
+                recommendations=result.text
             )
 
         except Exception as e:
@@ -435,7 +428,7 @@ def create_routes(db, auth_manager, bot_instance=None):
         """Health check endpoint."""
         return {
             "status": "ok",
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
 
     return router
