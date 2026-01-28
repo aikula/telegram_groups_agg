@@ -91,10 +91,11 @@ class Database:
             )
         """)
 
-        # Chats table
+        # Chats table (v2.1: added chat_id for AGENTS.md)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS chats (
                 id INTEGER PRIMARY KEY,
+                chat_id INTEGER UNIQUE,
                 title TEXT NOT NULL,
                 type TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -134,16 +135,15 @@ class Database:
             )
         """)
 
-        # Chat settings table
+        # Chat settings table (v2.1: enabled_skills JSON format)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS chat_settings (
                 chat_id INTEGER PRIMARY KEY,
-                summary_enabled BOOLEAN DEFAULT 1,
+                enabled_skills TEXT DEFAULT '["summary","coach","qa","analytics"]',
                 summary_time_local TEXT DEFAULT '16:00',
                 summary_timezone TEXT DEFAULT 'Europe/Moscow',
                 summary_custom_prompt TEXT,
                 summary_target TEXT DEFAULT 'chat',
-                coach_enabled BOOLEAN DEFAULT 1,
                 coach_custom_prompt TEXT,
                 coach_target TEXT DEFAULT 'chat',
                 language TEXT DEFAULT 'ru',
@@ -321,41 +321,177 @@ class Database:
 
     async def _run_migrations(self, db: aiosqlite.Connection) -> None:
         """
-        Run database migrations to update schema.
+        Run database migrations with version tracking (v2.2).
+
+        Creates schema_migrations table if not exists and tracks
+        which migrations have been applied. Only runs pending migrations.
         """
-        # Add telegram_id column if not exists
+        # Create migration tracking table (v2.2)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                description TEXT
+            )
+        """)
+        logger.info("schema_migrations table ensured")
+
+        # Get current version
+        cursor = await db.execute("SELECT MAX(version) FROM schema_migrations")
+        result = await cursor.fetchone()
+        current_version = result[0] if result and result[0] else 0
+
+        # Define migrations
+        migrations = [
+            (1, "Initial schema", self._migrate_v1),
+            (2, "Add telegram_id column", self._migrate_v2),
+            (3, "Add otp_codes table", self._migrate_v3),
+            (4, "Add enabled_skills JSON format", self._migrate_v4),
+            (5, "Add role column to chat_members", self._migrate_v5),
+            (6, "Add chat_id column to chats table", self._migrate_v6),
+        ]
+
+        # Run pending migrations
+        for version, description, migration_fn in migrations:
+            if version > current_version:
+                logger.info(f"Running migration v{version}: {description}")
+                try:
+                    await migration_fn(db)
+                    await db.execute(
+                        "INSERT INTO schema_migrations (version, description) VALUES (?, ?)",
+                        (version, description)
+                    )
+                    logger.info(f"Migration v{version} completed successfully")
+                except Exception as e:
+                    logger.error(f"Migration v{version} failed: {e}")
+                    raise  # Fail fast to prevent partial migrations
+
+        logger.info(f"All migrations complete. Current version: {len(migrations)}")
+
+    # Migration functions (v2.2)
+    async def _migrate_v1(self, db: aiosqlite.Connection) -> None:
+        """Initial schema (no-op, tables created in _create_tables)."""
+        pass
+
+    async def _migrate_v2(self, db: aiosqlite.Connection) -> None:
+        """Add telegram_id column to users table."""
         try:
             await db.execute("""
                 ALTER TABLE users ADD COLUMN telegram_id INTEGER
             """)
-            logger.info("Migration: Added telegram_id column to users table")
-        except Exception:
+            logger.info("  -> Added telegram_id column to users table")
+        except aiosqlite.OperationalError:
             # Column already exists
-            pass
+            logger.info("  -> telegram_id column already exists")
 
-        # Add otp_codes table if not exists (for older databases)
-        try:
+    async def _migrate_v3(self, db: aiosqlite.Connection) -> None:
+        """Add otp_codes table."""
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS otp_codes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                telegram_id INTEGER NOT NULL,
+                expires_at TIMESTAMP NOT NULL,
+                used_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_otp_codes_code ON otp_codes(code)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_otp_codes_expires_at ON otp_codes(expires_at)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_otp_codes_user_id ON otp_codes(user_id)
+        """)
+        logger.info("  -> otp_codes table ensured")
+
+    async def _migrate_v4(self, db: aiosqlite.Connection) -> None:
+        """Add enabled_skills JSON format to chat_settings."""
+        # Check if enabled_skills column exists
+        cursor = await db.execute("PRAGMA table_info(chat_settings)")
+        columns = await cursor.fetchall()
+        column_names = [col[1] for col in columns]
+
+        if 'enabled_skills' not in column_names:
+            # Add column and migrate from old format
             await db.execute("""
-                CREATE TABLE IF NOT EXISTS otp_codes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    code TEXT NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    telegram_id INTEGER NOT NULL,
-                    expires_at TIMESTAMP NOT NULL,
-                    used_at TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (user_id) REFERENCES users(id)
+                ALTER TABLE chat_settings ADD COLUMN enabled_skills TEXT
+            """)
+            logger.info("  -> Added enabled_skills column to chat_settings")
+
+    async def _migrate_v5(self, db: aiosqlite.Connection) -> None:
+        """Add role column to chat_members table."""
+        # Check if role column exists
+        cursor = await db.execute("PRAGMA table_info(chat_members)")
+        columns = await cursor.fetchall()
+        column_names = [col[1] for col in columns]
+
+        if 'role' not in column_names:
+            await db.execute("""
+                ALTER TABLE chat_members ADD COLUMN role TEXT DEFAULT 'member'
+            """)
+            logger.info("  -> Added role column to chat_members")
+
+            # Promote first member of each chat to admin
+            await db.execute("""
+                UPDATE chat_members
+                SET role = 'admin'
+                WHERE rowid IN (
+                    SELECT MIN(rowid)
+                    FROM chat_members
+                    GROUP BY chat_id
                 )
             """)
+            logger.info("  -> Promoted first member of each chat to admin")
+
+            # Create index for role lookups
             await db.execute("""
-                CREATE INDEX IF NOT EXISTS idx_otp_codes_code ON otp_codes(code)
+                CREATE INDEX IF NOT EXISTS idx_chat_members_role
+                ON chat_members(chat_id, role)
+                WHERE left_at IS NULL
             """)
+            logger.info("  -> Created index on chat_members(chat_id, role)")
+        else:
+            logger.info("  -> role column already exists in chat_members")
+
+    async def _migrate_v6(self, db: aiosqlite.Connection) -> None:
+        """Add chat_id column to chats table and create index."""
+        # Check if chat_id column exists
+        cursor = await db.execute("PRAGMA table_info(chats)")
+        columns = await cursor.fetchall()
+        column_names = [col[1] for col in columns]
+
+        if 'chat_id' not in column_names:
+            # Add column (nullable initially, will be populated)
             await db.execute("""
-                CREATE INDEX IF NOT EXISTS idx_otp_codes_expires ON otp_codes(expires_at)
+                ALTER TABLE chats ADD COLUMN chat_id INTEGER
             """)
-            logger.info("Migration: Added otp_codes table")
-        except Exception:
-            pass
+            logger.info("  -> Added chat_id column to chats table")
+
+            # Copy existing id values to chat_id for backward compatibility
+            await db.execute("""
+                UPDATE chats SET chat_id = id WHERE chat_id IS NULL
+            """)
+            logger.info("  -> Populated chat_id from id values")
+
+            # Create unique index on chat_id
+            await db.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_chats_chat_id
+                ON chats(chat_id)
+            """)
+            logger.info("  -> Created unique index on chats(chat_id)")
+        else:
+            logger.info("  -> chat_id column already exists in chats table")
+            # Ensure index exists
+            await db.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_chats_chat_id
+                ON chats(chat_id)
+            """)
+
 
     # === Connection Management ===
 
@@ -480,18 +616,20 @@ class Database:
         """
         Get existing chat or create new one.
 
+        v2.1: Uses chat_id column (Telegram chat ID) separately from id (internal PK).
+
         Args:
             chat_id: Telegram chat ID
             title: Chat title
             chat_type: Type of chat (group, supergroup)
 
         Returns:
-            Chat data dictionary
+            Chat data dictionary with both 'id' (internal) and 'chat_id' (Telegram)
         """
         async with self.get_connection() as db:
-            # Try to get existing chat
+            # Try to get existing chat by chat_id (v2.1)
             cursor = await db.execute(
-                "SELECT * FROM chats WHERE id = ?",
+                "SELECT * FROM chats WHERE chat_id = ?",
                 (chat_id,)
             )
             row = await cursor.fetchone()
@@ -500,18 +638,22 @@ class Database:
                 columns = [desc[0] for desc in cursor.description]
                 return dict(zip(columns, row))
 
-            # Create new chat
-            await db.execute(
+            # Create new chat (id auto-increments, chat_id is set)
+            cursor = await db.execute(
                 """
-                INSERT INTO chats (id, title, type)
+                INSERT INTO chats (chat_id, title, type)
                 VALUES (?, ?, ?)
                 """,
                 (chat_id, title, chat_type)
             )
             await db.commit()
 
+            # Get the auto-generated internal id
+            internal_id = cursor.lastrowid
+
             return {
-                "id": chat_id,
+                "id": internal_id,
+                "chat_id": chat_id,
                 "title": title,
                 "type": chat_type,
                 "created_at": datetime.now().isoformat(),
@@ -886,21 +1028,14 @@ class Database:
         chat_id: int,
         updates: Dict[str, Any]
     ) -> None:
-        """Update chat settings (partial update). Creates row if doesn't exist."""
+        """
+        Update chat settings (partial update).
+        Creates row if doesn't exist.
+
+        v2.1: Supports both legacy boolean format and new enabled_skills JSON format.
+        """
         if not updates:
             return
-
-        # Whitelist of allowed column names to prevent SQL injection
-        ALLOWED_SETTINGS = {
-            "summary_enabled",
-            "coach_enabled",
-            "language",
-        }
-
-        # Validate column names
-        invalid_columns = set(updates.keys()) - ALLOWED_SETTINGS
-        if invalid_columns:
-            raise ValueError(f"Invalid settings columns: {invalid_columns}. Allowed: {ALLOWED_SETTINGS}")
 
         async with self.get_connection() as db:
             # First check if settings exist
@@ -910,30 +1045,100 @@ class Database:
             )
             exists = await cursor.fetchone() is not None
 
+            # Get current settings if exists
+            current_settings = None
+            if exists:
+                cursor = await db.execute(
+                    "SELECT * FROM chat_settings WHERE chat_id = ?",
+                    (chat_id,)
+                )
+                row = await cursor.fetchone()
+                columns = [desc[0] for desc in cursor.description]
+                current_settings = dict(zip(columns, row))
+
+            # Handle enabled_skills updates
+            enabled_skills = None
+            if "enabled_skills" in updates:
+                enabled_skills = updates.pop("enabled_skills")
+                if isinstance(enabled_skills, list):
+                    enabled_skills = json.dumps(enabled_skills)
+
+            # Check for legacy boolean settings
+            if "summary_enabled" in updates or "coach_enabled" in updates:
+                # Convert legacy boolean to new enabled_skills
+                current_enabled = self._parse_enabled_skills(current_settings)
+                if "summary_enabled" in updates:
+                    if updates["summary_enabled"] and "summary" not in current_enabled:
+                        current_enabled.append("summary")
+                if "coach_enabled" in updates:
+                    if updates["coach_enabled"] and "coach" not in current_enabled:
+                        current_enabled.append("coach")
+                enabled_skills = json.dumps(current_enabled)
+
+            # Update insert
             if exists:
                 # Update existing row
-                set_clause = ", ".join(f"{k} = ?" for k in updates.keys())
-                values = list(updates.values()) + [chat_id]
-                await db.execute(
-                    f"UPDATE chat_settings SET {set_clause} WHERE chat_id = ?",
-                    values
-                )
+                if enabled_skills is not None:
+                    await db.execute(
+                        "UPDATE chat_settings SET enabled_skills = ? WHERE chat_id = ?",
+                        (enabled_skills, chat_id)
+                    )
+
+                # Update other fields if provided
+                if updates:
+                    # Filter out handled fields
+                    remaining_updates = {k: v for k, v in updates.items()
+                                           if k not in ["enabled_skills", "summary_enabled", "coach_enabled"]}
+                    if remaining_updates:
+                        set_clause = ", ".join(f"{k} = ?" for k in remaining_updates.keys())
+                        values = list(remaining_updates.values()) + [chat_id]
+                        await db.execute(
+                            f"UPDATE chat_settings SET {set_clause} WHERE chat_id = ?",
+                            values
+                        )
             else:
-                # Insert new row with provided values and defaults
+                # Insert new row
                 all_values = {
-                    "summary_enabled": 1,
-                    "coach_enabled": 1,
-                    "language": "ru",
+                    "enabled_skills": enabled_skills or '["summary", "coach", "qa", "analytics"]',
                 }
-                all_values.update(updates)
+                # Add other fields
+                if updates:
+                    all_values.update(updates)
+
+                # Build insert statement dynamically
+                columns = list(all_values.keys())
+                placeholders = ", ".join(["?"] * len(columns))
                 await db.execute(
-                    """
-                    INSERT INTO chat_settings (chat_id, summary_enabled, coach_enabled, language)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (chat_id, all_values["summary_enabled"], all_values["coach_enabled"], all_values["language"])
+                    f"INSERT INTO chat_settings (chat_id, {', '.join(columns)}) VALUES (?, {placeholders})",
+                    [chat_id] + list(all_values.values())
                 )
+
             await db.commit()
+
+    def _parse_enabled_skills(self, settings: Optional[Dict[str, Any]]) -> List[str]:
+        """
+        Parse enabled_skills from settings dict (v2.1).
+        Supports both JSON format and legacy boolean format.
+        """
+        if not settings:
+            return ["qa", "analytics"]  # Default minimal skills
+
+        # Try JSON format first
+        if "enabled_skills" in settings:
+            try:
+                return json.loads(settings["enabled_skills"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # Fallback to legacy boolean format
+        skills = []
+        if settings.get("summary_enabled"):
+            skills.append("summary")
+        if settings.get("coach_enabled"):
+            skills.append("coach")
+        # Always include qa and analytics
+        skills.extend(["qa", "analytics"])
+        return skills
 
     # === LLM Usage Tracking ===
 
@@ -1067,18 +1272,50 @@ class Database:
     async def execute_query(
         self,
         query: str,
-        params: Optional[tuple] = None
+        params: Optional[tuple] = None,
+        allow_write: bool = False  # v2.2: Safety flag
     ) -> List[Dict[str, Any]]:
         """
-        Execute a generic SELECT query and return results as list of dicts.
+        Execute a parameterized SQL query and return results as list of dicts.
+
+        SECURITY WARNING (v2.2):
+        - Only use with trusted, parameterized queries
+        - User-provided queries should use the sql_analytics tool instead
+        - Set allow_write=True only for INSERT/UPDATE/DELETE operations
+        - This method does NOT perform SQL injection validation
 
         Args:
-            query: SQL SELECT query string
+            query: SQL query string (use ? for parameters)
             params: Optional query parameters tuple
+            allow_write: Allow INSERT/UPDATE/DELETE (default: False for read-only)
 
         Returns:
             List of dictionaries with column names as keys
+
+        Raises:
+            ValueError: If query contains unsafe patterns or allow_write=False with DML
         """
+        # Safety checks for raw SQL (v2.2)
+        if not allow_write:
+            query_upper = query.upper().strip()
+
+            # Must be SELECT or WITH (CTE)
+            if not (query_upper.startswith('SELECT') or query_upper.startswith('WITH')):
+                raise ValueError(
+                    "Only SELECT queries allowed with allow_write=False. "
+                    "Use allow_write=True for INSERT/UPDATE/DELETE."
+                )
+
+            # Check for dangerous keywords
+            dangerous = ['DROP', 'DELETE', 'UPDATE', 'INSERT', 'ALTER', 'CREATE']
+            for keyword in dangerous:
+                if keyword in query_upper:
+                    raise ValueError(
+                        f"Dangerous keyword '{keyword}' in read-only query. "
+                        f"Use allow_write=True if you intend to modify data."
+                    )
+
+        # Execute with parameters
         async with self.get_connection() as db:
             cursor = await db.execute(query, params or ())
             rows = await cursor.fetchall()
@@ -1336,7 +1573,7 @@ class Database:
                             "SELECT id FROM users WHERE username = ?",
                             (unique_username,)
                         )
-                        if not check.fetchone():
+                        if not await check.fetchone():
                             break
                         unique_username = f"{username}_{counter}"
                         counter += 1
@@ -1357,31 +1594,46 @@ class Database:
 
     async def get_chat_by_id(self, chat_id: int) -> Optional[Dict[str, Any]]:
         """
-        Get chat by ID.
+        Get chat by internal id or Telegram chat_id.
+
+        v2.1: First searches by internal id, then by chat_id (Telegram).
 
         Args:
-            chat_id: Telegram chat ID
+            chat_id: Internal id or Telegram chat ID
 
         Returns:
             Chat dict or None
         """
         async with self.get_connection() as db:
+            # Try internal id first (for backward compatibility)
             cursor = await db.execute(
                 """
-                SELECT id, title, type, created_at, deleted_at
+                SELECT id, chat_id, title, type, created_at, deleted_at
                 FROM chats WHERE id = ?
                 """,
                 (chat_id,)
             )
             row = await cursor.fetchone()
 
+            # If not found by internal id, try by chat_id (Telegram)
+            if not row:
+                cursor = await db.execute(
+                    """
+                    SELECT id, chat_id, title, type, created_at, deleted_at
+                    FROM chats WHERE chat_id = ?
+                    """,
+                    (chat_id,)
+                )
+                row = await cursor.fetchone()
+
             if row:
                 return {
                     "id": row[0],
-                    "title": row[1],
-                    "chat_type": row[2],
-                    "created_at": row[3],
-                    "deleted_at": row[4]
+                    "chat_id": row[1],
+                    "title": row[2],
+                    "chat_type": row[3],
+                    "created_at": row[4],
+                    "deleted_at": row[5]
                 }
             return None
 

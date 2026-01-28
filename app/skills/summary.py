@@ -1,12 +1,12 @@
 """
-Summary skill - Generate chat summaries (v2.0)
+Summary skill - Generate chat summaries (v2.1)
 
-Generates daily/weekly summaries of chat messages using LLM.
+Implements AGENTS.md specification with tool calling support.
 """
 
 import logging
-from typing import Optional, Dict, Any, List
-from datetime import timedelta
+from typing import Optional, Dict, Any
+from datetime import datetime, timedelta
 
 from app.skills.base import (
     BaseSkill,
@@ -28,7 +28,7 @@ class SummarySkillConfig(SkillConfig):
 
     max_messages: int = 200
     max_tokens: Optional[int] = None
-    temperature: float = 0.6  # Lower temperature for more consistent summaries
+    temperature: float = 0.6  # Lower temperature for consistent summaries
     language: str = "ru"
     include_timestamps: bool = True
     include_usernames: bool = True
@@ -40,7 +40,17 @@ class SummarySkill(BaseSkill):
 
     Generates concise summaries of chat discussions covering
     key topics, decisions, and action items.
+
+    AGENTS.md v2.1 specification:
+    - Uses tools: get_chat_history, sql_analytics
+    - Output format: markdown
+    - Temperature: 0.6
     """
+
+    name = "summary"
+    allowed_tools = ["get_chat_history", "sql_analytics"]
+    output_format = "markdown"
+    temperature = 0.6
 
     def __init__(
         self,
@@ -49,6 +59,83 @@ class SummarySkill(BaseSkill):
         config: Optional[SummarySkillConfig] = None
     ):
         super().__init__(db, llm, config or SummarySkillConfig())
+
+    def get_system_prompt(self, context: Dict[str, Any]) -> str:
+        """Get summary system prompt."""
+        return f"""You are a chat summarization expert.
+
+Task: Create structured summary of chat activity.
+
+Tools available:
+- get_chat_history(days) - Get messages to summarize
+- sql_analytics(query) - Get statistics
+
+Output format (Markdown):
+## 📊 Период
+{{start_date}} - {{end_date}}
+
+## 🔥 Основные темы
+1. **Тема 1** (N сообщений)
+   - Описание темы
+   - Ключевые моменты
+
+2. **Тема 2** (M сообщений)
+   - Описание темы
+
+## ✅ Принятые решения
+- Решение 1 (@username, дата)
+- Решение 2 (@username, дата)
+
+## 💬 Активные участники
+1. @username1 - N сообщений
+2. @username2 - M сообщений
+
+## ❓ Открытые вопросы
+- Вопрос 1
+- Вопрос 2
+
+## 📝 Заметки
+- Дополнительная информация
+
+Rules:
+- Use Russian
+- Include specific dates and @usernames when relevant
+- Cite important messages
+- Be concise but comprehensive
+- Organize information logically
+- Highlight action items and decisions
+
+Current context:
+- Chat: {context.get('chat_title', 'N/A')}
+- Chat ID: {context['chat_id']}
+- Date: {context.get('date', 'N/A')}
+
+When creating summaries:
+1. Use get_chat_history() to retrieve messages
+2. Group messages by topics and themes
+3. Identify key decisions and action items
+4. List most active participants
+5. Note any unresolved questions
+6. Format as structured markdown"""
+
+    async def format_output(self, text: str) -> str:
+        """Format summary output (markdown)."""
+        # Ensure proper markdown formatting
+        lines = []
+        for line in text.split('\n'):
+            stripped = line.strip()
+            if stripped:
+                lines.append(stripped)
+
+        formatted = '\n'.join(lines)
+
+        # Ensure Telegram limit
+        if len(formatted) > 4000:
+            formatted = formatted[:3950] + "\n\n... (обрезано)"
+
+        return formatted
+
+    # Legacy methods for backward compatibility
 
     async def execute(
         self,
@@ -59,7 +146,7 @@ class SummarySkill(BaseSkill):
         **kwargs
     ) -> SkillResult:
         """
-        Generate a chat summary.
+        Generate a chat summary (legacy method).
 
         Args:
             chat_id: Telegram chat ID
@@ -149,16 +236,7 @@ class SummarySkill(BaseSkill):
         chat_id: int,
         language: str = "ru"
     ) -> SkillResult:
-        """
-        Generate a daily summary (last 24 hours).
-
-        Args:
-            chat_id: Telegram chat ID
-            language: Summary language
-
-        Returns:
-            SkillResult with daily summary
-        """
+        """Generate a daily summary (last 24 hours)."""
         return await self.execute(
             chat_id=chat_id,
             days=1,
@@ -170,16 +248,7 @@ class SummarySkill(BaseSkill):
         chat_id: int,
         language: str = "ru"
     ) -> SkillResult:
-        """
-        Generate a weekly summary (last 7 days).
-
-        Args:
-            chat_id: Telegram chat ID
-            language: Summary language
-
-        Returns:
-            SkillResult with weekly summary
-        """
+        """Generate a weekly summary (last 7 days)."""
         return await self.execute(
             chat_id=chat_id,
             days=7,
@@ -193,18 +262,7 @@ class SummarySkill(BaseSkill):
         days: int = 1,
         language: str = "ru"
     ) -> SkillResult:
-        """
-        Generate a summary with custom instructions.
-
-        Args:
-            chat_id: Telegram chat ID
-            custom_prompt: Custom instructions for the summary
-            days: Number of days to summarize
-            language: Summary language
-
-        Returns:
-            SkillResult with custom summary
-        """
+        """Generate a summary with custom instructions."""
         return await self.execute(
             chat_id=chat_id,
             days=days,

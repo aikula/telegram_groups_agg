@@ -1,5 +1,7 @@
 """
-Base skill class and common types for all skills (v2.0)
+Base skill class and common types for all skills (v2.1)
+
+Implements AGENTS.md specification with tool calling support.
 """
 
 import logging
@@ -61,11 +63,31 @@ class SkillError(Exception):
 
 class BaseSkill(ABC):
     """
-    Base class for all AI-powered skills.
+    Base class for all AI-powered skills with tool calling support.
 
-    Provides common functionality for message retrieval,
-    LLM interaction, and result formatting.
+    Implements AGENTS.md v2.0 specification:
+    - Class attributes: name, allowed_tools, output_format, temperature
+    - Methods: get_system_prompt(), get_tool_definitions(), format_output()
+
+    Example:
+        class MySkill(BaseSkill):
+            name = "my_skill"
+            allowed_tools = ["get_chat_history", "sql_analytics"]
+            output_format = "text"
+            temperature = 0.7
+
+            def get_system_prompt(self, context):
+                return "You are a helpful assistant..."
+
+            def format_output(self, text):
+                return text[:4000]  # Telegram limit
     """
+
+    # Class attributes to be overridden by subclasses
+    name: str = "base_skill"
+    allowed_tools: List[str] = []
+    output_format: str = "text"  # text, markdown, json
+    temperature: float = 0.7
 
     def __init__(
         self,
@@ -84,25 +106,115 @@ class BaseSkill(ABC):
         self.db = db
         self.llm = llm or get_llm_client()
         self.config = config or SkillConfig()
-        self.skill_name = self.__class__.__name__
+        self.skill_name = self.name  # Use class attribute
 
     @abstractmethod
-    async def execute(
-        self,
-        chat_id: int,
-        **kwargs
-    ) -> SkillResult:
+    def get_system_prompt(self, context: Dict[str, Any]) -> str:
         """
-        Execute the skill.
+        Get system prompt for this skill.
 
         Args:
-            chat_id: Telegram chat ID
-            **kwargs: Additional skill-specific parameters
+            context: Dict with chat_id, username, full_name, chat_title, date
 
         Returns:
-            SkillResult with generated text and metadata
+            System prompt string for LLM
         """
         pass
+
+    def get_tool_definitions(self) -> List[Dict[str, Any]]:
+        """
+        Get tool definitions for this skill.
+
+        Returns:
+            List of tool definitions in OpenAI Function Calling format
+        """
+        # Lazy import to avoid circular dependency
+        from app.core.tools import get_tool_definitions
+        available_tools = get_tool_definitions()
+        return [
+            tool for tool in available_tools
+            if tool["function"]["name"] in self.allowed_tools
+        ]
+
+    async def format_output(self, text: str) -> str:
+        """
+        Format LLM output for delivery.
+
+        Handles Telegram limits and output format requirements.
+
+        Args:
+            text: Raw LLM response
+
+        Returns:
+            Formatted output
+        """
+        # Telegram message limit: 4096 chars
+        if len(text) > 4000:
+            return text[:3950] + "... (обрезано)"
+
+        # Apply format-specific handling
+        if self.output_format == "markdown":
+            return self._format_markdown(text)
+        elif self.output_format == "json":
+            return self._format_json(text)
+        else:  # text
+            return text.strip()
+
+    def _format_markdown(self, text: str) -> str:
+        """Ensure markdown is properly formatted."""
+        # Remove excessive whitespace
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        return '\n'.join(lines)
+
+    def _format_json(self, text: str) -> str:
+        """Ensure JSON is valid."""
+        import json
+        try:
+            # Try to parse and re-format
+            data = json.loads(text)
+            return json.dumps(data, ensure_ascii=False, indent=2)
+        except json.JSONDecodeError:
+            # Return as-is if not valid JSON
+            return text
+
+    async def prepare_context(
+        self,
+        query: str,
+        chat_id: int,
+        user_id: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Prepare context for skill execution.
+
+        Args:
+            query: User query
+            chat_id: Telegram chat ID
+            user_id: User ID (optional)
+
+        Returns:
+            Context dict with chat and user information
+        """
+        # Get chat info
+        chat = await self.db.get_chat_by_id(chat_id)
+
+        # Get user info
+        user_info = None
+        if user_id:
+            user = await self.db.get_or_create_user(user_id)
+            user_info = {
+                "username": user.get("username"),
+                "full_name": user.get("first_name") or user.get("username", "User")
+            }
+
+        return {
+            "chat_id": chat_id,
+            "chat_title": chat.get("title", "") if chat else "",
+            "username": user_info.get("username") if user_info else "",
+            "full_name": user_info.get("full_name") if user_info else "",
+            "date": datetime.now().strftime("%Y-%m-%d"),
+        }
+
+    # Legacy methods for backward compatibility
 
     async def _get_messages(
         self,
@@ -112,7 +224,7 @@ class BaseSkill(ABC):
         exclude_deleted: bool = True
     ) -> List[Dict[str, Any]]:
         """
-        Get messages for processing.
+        Get messages for processing (legacy method).
 
         Args:
             chat_id: Telegram chat ID
@@ -137,7 +249,7 @@ class BaseSkill(ABC):
 
     def _format_messages(self, messages: List[Dict[str, Any]]) -> str:
         """
-        Format messages for LLM prompt.
+        Format messages for LLM prompt (legacy method).
 
         Args:
             messages: List of message dictionaries
@@ -164,7 +276,7 @@ class BaseSkill(ABC):
         temperature: Optional[float] = None
     ) -> Dict[str, Any]:
         """
-        Call LLM with the given prompt.
+        Call LLM with the given prompt (legacy method).
 
         Args:
             prompt: User prompt
@@ -209,7 +321,7 @@ class BaseSkill(ABC):
         cost_usd: float
     ) -> None:
         """
-        Log LLM token usage to database.
+        Log LLM token usage to database (legacy method).
 
         Args:
             chat_id: Telegram chat ID
@@ -233,16 +345,7 @@ class BaseSkill(ABC):
         error_message: str,
         details: Optional[Dict[str, Any]] = None
     ) -> SkillResult:
-        """
-        Create an error result.
-
-        Args:
-            error_message: Error message
-            details: Optional error details
-
-        Returns:
-            SkillResult with success=False
-        """
+        """Create an error result (legacy method)."""
         return SkillResult(
             success=False,
             text=error_message,
@@ -257,18 +360,7 @@ class BaseSkill(ABC):
         usage: Optional[Dict[str, int]] = None,
         cost_usd: float = 0.0
     ) -> SkillResult:
-        """
-        Create a success result.
-
-        Args:
-            text: Generated text
-            metadata: Optional metadata
-            usage: Token usage dict
-            cost_usd: Estimated cost
-
-        Returns:
-            SkillResult with success=True
-        """
+        """Create a success result (legacy method)."""
         return SkillResult(
             success=True,
             text=text,

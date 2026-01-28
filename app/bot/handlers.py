@@ -18,6 +18,8 @@ from app.config import settings
 from app.core.db import Database
 from app.core.i18n import get_text
 from app.core.llm import get_llm_client
+from app.core.router import RouterAgent
+from app.core.agent import SkillAgent
 
 
 logger = logging.getLogger(__name__)
@@ -431,39 +433,29 @@ async def cmd_ask(message: Message, db: Database) -> None:
         await message.answer("Пожалуйста, задайте вопрос после команды.\nПример: /ask Что обсуждали сегодня?")
         return
 
-    # Get recent messages for context
-    messages = await db.get_recent_messages(chat_id, limit=25, hours=24)
-
-    if not messages:
-        text = get_text("qa.no_context", lang=language)
-        await message.answer(text)
-        return
-
-    # Generate answer
+    # === NEW AGENTIC ARCHITECTURE (v2.1) ===
+    # Use Router + SkillAgent instead of direct LLM call
     llm = get_llm_client()
 
     try:
-        result = await llm.chat_qa(
-            question=question,
-            context=messages,
-            language=language
+        # Step 1: Route query to appropriate skill
+        router = RouterAgent(db, llm)
+        skill_name = await router.route(question, chat_id=chat_id)
+
+        # Step 2: Execute skill with tool calling
+        agent = SkillAgent(db, llm)
+        response = await agent.execute(
+            skill_name=skill_name,
+            query=question,
+            chat_id=chat_id,
+            user_id=message.from_user.id
         )
 
         # Send answer
-        await message.answer(result["text"])
-
-        # Log usage
-        await db.log_llm_usage(
-            user_id=message.from_user.id,
-            chat_id=chat_id,
-            skill="qa",
-            tokens_prompt=result["usage"]["prompt_tokens"],
-            tokens_completion=result["usage"]["completion_tokens"],
-            cost_usd=result.get("cost_usd", 0.0)
-        )
+        await message.answer(response)
 
     except Exception as e:
-        logger.error(f"Error generating answer: {e}")
+        logger.error(f"Error in agentic flow: {e}")
         text = get_text("error.llm_failed", lang=language)
         await message.answer(text)
 
@@ -561,39 +553,30 @@ async def handle_message(message: Message, db: Database, bot: Bot) -> None:
                     language = "ru"  # TODO: Get from user settings
                     logger.info(f"🤖 Bot mention detected from user {user_id}: {question}")
 
-                    # Get recent messages for context
-                    messages = await db.get_recent_messages(chat_id, limit=25, hours=24)
-
-                    if not messages:
-                        text = get_text("qa.no_context", lang=language)
-                        await message.reply(text)
-                        return
-
-                    # Generate answer
+                    # === NEW AGENTIC ARCHITECTURE (v2.1) ===
+                    # Use Router + SkillAgent instead of direct LLM call
                     llm = get_llm_client()
 
                     try:
-                        result = await llm.chat_qa(
-                            question=question,
-                            context=messages,
-                            language=language
+                        # Step 1: Route query to appropriate skill
+                        router = RouterAgent(db, llm)
+                        skill_name = await router.route(question, chat_id=chat_id)
+                        logger.info(f"📍 Routed to skill: {skill_name}")
+
+                        # Step 2: Execute skill with tool calling
+                        agent = SkillAgent(db, llm)
+                        response = await agent.execute(
+                            skill_name=skill_name,
+                            query=question,
+                            chat_id=chat_id,
+                            user_id=user_id
                         )
 
                         # Send answer
-                        await message.reply(result["text"])
-
-                        # Log usage
-                        await db.log_llm_usage(
-                            user_id=user_id,
-                            chat_id=chat_id,
-                            skill="qa_mention",
-                            tokens_prompt=result["usage"]["prompt_tokens"],
-                            tokens_completion=result["usage"]["completion_tokens"],
-                            cost_usd=result.get("cost_usd", 0.0)
-                        )
+                        await message.reply(response)
 
                     except Exception as e:
-                        logger.error(f"Error generating answer from mention: {e}")
+                        logger.error(f"Error in agentic flow: {e}")
                         text = get_text("error.llm_failed", lang=language)
                         await message.reply(text)
 

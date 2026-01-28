@@ -44,6 +44,17 @@ class SuperadminLoginRequest(BaseModel):
     password: str
 
 
+class OTPRequest(BaseModel):
+    """OTP request model."""
+    telegram_id: int
+
+
+class OTPVerifyRequest(BaseModel):
+    """OTP verification request model."""
+    telegram_id: int
+    otp: str
+
+
 class TokenResponse(BaseModel):
     """Token response model."""
     access_token: str

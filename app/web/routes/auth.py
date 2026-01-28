@@ -16,7 +16,9 @@ from app.web.auth import (
     TokenResponse,
     UserInfo,
     TelegramAuthRequest,
-    SuperadminLoginRequest
+    SuperadminLoginRequest,
+    OTPRequest,
+    OTPVerifyRequest
 )
 
 logger = logging.getLogger(__name__)
@@ -216,16 +218,178 @@ async def get_config(request: Request):
 
 
 class OTPLoginRequest(BaseModel):
-    """OTP login request model."""
+    """OTP login request model (legacy)."""
     code: str
+
+
+@router.post("/request-otp")
+async def request_otp(request: Request, otp_request: OTPRequest):
+    """
+    Request OTP code for authentication.
+
+    Generates a 6-digit OTP code and sends it to user via Telegram bot.
+
+    Request body:
+        - telegram_id: Telegram user ID
+
+    Returns:
+        Success message with code validity period
+
+    Rate limit: 3 requests per minute per telegram_id
+    """
+    from app.core.rate_limiter import get_rate_limiter
+
+    db = request.app.state.db
+    rate_limiter = get_rate_limiter()
+    telegram_id = otp_request.telegram_id
+
+    # Rate limiting by telegram_id
+    allowed, retry_after = await rate_limiter.check_api_rate_limit(
+        endpoint="otp_request",
+        identifier=str(telegram_id)
+    )
+
+    if not allowed:
+        logger.warning(
+            f"OTP request rate limited for telegram_id: {telegram_id}, "
+            f"retry_after: {retry_after}"
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many OTP requests. Try again in {int(retry_after or 60)} seconds.",
+            headers={"Retry-After": str(int(retry_after or 60))}
+        )
+
+    logger.info(f"OTP request for telegram_id: {telegram_id}")
+
+    # Get or create user by telegram_id
+    user = await db.get_user_by_telegram_id(telegram_id)
+
+    if not user:
+        # Create user without data - will be populated when they verify OTP
+        success = await db.create_user_from_telegram(
+            telegram_id=telegram_id,
+            username=f"user_{telegram_id}",
+            first_name="",
+            last_name=""
+        )
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to create user")
+
+        user = await db.get_user_by_telegram_id(telegram_id)
+
+    # Generate OTP code (valid for 5 minutes)
+    otp_code = await db.create_otp(
+        user_id=user['id'],
+        telegram_id=telegram_id,
+        valid_minutes=5
+    )
+
+    # Send OTP to user via Telegram bot
+    try:
+        from app.config import settings
+        import httpx
+
+        bot_token = settings.telegram_bot_token
+        if not bot_token:
+            raise HTTPException(status_code=500, detail="Bot not configured")
+
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                json={
+                    "chat_id": telegram_id,
+                    "text": f"🔐 Your authentication code: {otp_code}\n\nValid for 5 minutes.\n\nIf you didn't request this, ignore this message."
+                }
+            )
+
+        # Security: Don't log the actual OTP code
+        logger.info(f"OTP sent successfully to telegram_id: {telegram_id}")
+
+    except Exception as e:
+        logger.error(f"Failed to send OTP via Telegram: {e}")
+        # Still return success - OTP was created and can be verified
+        # The bot might be unable to send messages, but the code exists
+
+    return {
+        "message": "OTP code sent to your Telegram",
+        "expires_in": 300  # 5 minutes in seconds
+    }
+
+
+@router.post("/verify-otp", response_model=TokenResponse)
+async def verify_otp(request: Request, otp_verify: OTPVerifyRequest):
+    """
+    Verify OTP code and return JWT token.
+
+    Request body:
+        - telegram_id: Telegram user ID
+        - otp: 6-digit OTP code
+
+    Returns:
+        Access token and expiration time
+
+    Rate limit: 10 requests per minute per telegram_id
+    """
+    from app.core.rate_limiter import get_rate_limiter
+
+    db = request.app.state.db
+    rate_limiter = get_rate_limiter()
+    telegram_id = otp_verify.telegram_id
+
+    # Rate limiting by telegram_id
+    allowed, retry_after = await rate_limiter.check_api_rate_limit(
+        endpoint="otp_verify",
+        identifier=str(telegram_id)
+    )
+
+    if not allowed:
+        logger.warning(
+            f"OTP verify rate limited for telegram_id: {telegram_id}, "
+            f"retry_after: {retry_after}"
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many verification attempts. Try again in {int(retry_after or 60)} seconds.",
+            headers={"Retry-After": str(int(retry_after or 60))}
+        )
+
+    logger.info(f"OTP verify attempt for telegram_id: {telegram_id}")
+
+    logger.info(f"OTP verify attempt for telegram_id: {otp_verify.telegram_id}")
+
+    # Verify OTP
+    user_data = await db.verify_otp(otp_verify.otp)
+
+    if not user_data or user_data.get('telegram_id') != otp_verify.telegram_id:
+        logger.warning(f"Failed OTP verification for telegram_id: {otp_verify.telegram_id}")
+        raise HTTPException(status_code=401, detail="Invalid or expired code")
+
+    logger.info(f"Successful OTP verification for telegram_id: {user_data['telegram_id']}")
+
+    # Generate JWT token
+    from app.web.auth import create_access_token
+    token, expires_in = create_access_token(
+        username=user_data['username'],
+        user_id=user_data['user_id'],
+        is_superadmin=False
+    )
+
+    return TokenResponse(
+        access_token=token,
+        token_type="bearer",
+        expires_in=expires_in
+    )
 
 
 @router.post("/otp", response_model=TokenResponse)
 async def login_otp(request: Request, otp_data: OTPLoginRequest):
     """
-    Authenticate using one-time password from Telegram bot.
+    Authenticate using one-time password from Telegram bot (legacy endpoint).
 
     User sends /login to bot, receives 6-digit code, and enters it here.
+
+    DEPRECATED: Use /api/auth/verify-otp instead.
 
     Request body:
         - code: 6-digit OTP code from bot

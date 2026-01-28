@@ -71,6 +71,13 @@ DEFAULT_LIMITS = {
     "group": RateLimit(max_requests=20, window_seconds=1),  # 20 msg/sec for groups
     "private": RateLimit(max_requests=30, window_seconds=1),  # 30 msg/sec for private
     "admin": RateLimit(max_requests=50, window_seconds=1),  # Higher limit for admin operations
+
+    # API endpoint rate limits (v2.2 - Security enhancement)
+    "otp_request": RateLimit(max_requests=3, window_seconds=60),  # 3 OTP requests per minute
+    "otp_verify": RateLimit(max_requests=10, window_seconds=60),  # 10 verifications per minute
+    "auth_login": RateLimit(max_requests=5, window_seconds=300),  # 5 logins per 5 minutes
+    "auth_register": RateLimit(max_requests=3, window_seconds=3600),  # 3 registrations per hour
+    "settings_update": RateLimit(max_requests=10, window_seconds=60),  # 10 settings updates per minute
 }
 
 
@@ -291,6 +298,62 @@ class RateLimiter:
         self._chat_buckets.clear()
         self._user_buckets.clear()
         self._global_bucket = self._create_bucket(self._global_limit)
+
+    # API endpoint rate limiting (v2.2)
+    async def check_api_rate_limit(
+        self,
+        endpoint: str,
+        identifier: str,
+        tokens: int = 1
+    ) -> Tuple[bool, Optional[float]]:
+        """
+        Check rate limit for API endpoints.
+
+        This is a separate rate limiting system for API endpoints like
+        OTP generation, authentication, etc. It uses identifier-based
+        limiting (IP, telegram_id, user_id) instead of chat/user buckets.
+
+        Args:
+            endpoint: Endpoint type (otp_request, otp_verify, auth_login, etc.)
+            identifier: Unique identifier (IP address, user_id, telegram_id)
+            tokens: Number of tokens to consume
+
+        Returns:
+            Tuple of (allowed, retry_after_seconds)
+        """
+        async with self._lock:
+            now = time.time()
+
+            # Get limit for endpoint
+            limit = self._limits.get(endpoint)
+            if limit is None:
+                # No specific limit for this endpoint, allow
+                return True, None
+
+            # Create a bucket key for this endpoint+identifier combination
+            bucket_key = f"api:{endpoint}:{identifier}"
+
+            # Get or create bucket
+            if bucket_key not in self._chat_buckets:  # Reuse _chat_buckets for API buckets
+                self._chat_buckets[bucket_key] = self._create_bucket(limit)
+
+            bucket = self._chat_buckets[bucket_key]
+
+            # Refill based on current time
+            bucket.refill(now)
+
+            # Check if we can consume
+            if not bucket.consume(tokens):
+                retry_after = self._calculate_retry_after(bucket, tokens)
+                logger.warning(
+                    f"API rate limit exceeded for {endpoint}:{identifier}, "
+                    f"retry after {retry_after:.1f}s"
+                )
+                self._stats["throttled_requests"] += 1
+                return False, retry_after
+
+            self._stats["total_requests"] += 1
+            return True, None
 
 
 class RateLimitError(Exception):

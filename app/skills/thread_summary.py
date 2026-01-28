@@ -1,7 +1,7 @@
 """
-Thread summary skill - Summarize message threads (v2.0)
+Thread summary skill - Summarize message threads (v2.1)
 
-Generates concise summaries of specific message threads/conversations.
+Implements AGENTS.md specification with tool calling support.
 """
 
 import logging
@@ -40,7 +40,17 @@ class ThreadSummarySkill(BaseSkill):
 
     Summarizes specific message threads based on reply chains
     or recent context around a target message.
+
+    AGENTS.md v2.1 specification:
+    - Uses tools: get_chat_history
+    - Output format: markdown
+    - Temperature: 0.6
     """
+
+    name = "thread_summary"
+    allowed_tools = ["get_chat_history"]
+    output_format = "markdown"
+    temperature = 0.6
 
     def __init__(
         self,
@@ -49,6 +59,72 @@ class ThreadSummarySkill(BaseSkill):
         config: Optional[ThreadSummarySkillConfig] = None
     ):
         super().__init__(db, llm, config or ThreadSummarySkillConfig())
+
+    def get_system_prompt(self, context: Dict[str, Any]) -> str:
+        """Get thread summary system prompt."""
+        return f"""You are a conversation summarization expert.
+
+Task: Create a concise summary of a message thread or conversation.
+
+Tools available:
+- get_chat_history(days, limit) - Retrieve messages to summarize
+
+Output format (Markdown):
+## 💬 Thread Summary
+
+**Тема обсуждения**
+Краткое описание основной темы или вопроса, который обсуждается.
+
+**Ключевые моменты**
+1. Первый важный момент
+2. Второй важный момент
+3. Третий важный момент
+
+**Участники**
+- @username1: основной вклад
+- @username2: дополнительные комментарии
+
+**Результат (если есть)**
+- Какое решение было принято или к какому выводу пришли
+
+Rules:
+- Use Russian
+- Include @usernames and timestamps when relevant
+- Be concise but comprehensive
+- Capture the essence of the discussion
+- Note any decisions or conclusions
+
+Current context:
+- Chat: {context.get('chat_title', 'N/A')}
+- Chat ID: {context['chat_id']}
+- Date: {context.get('date', 'N/A')}
+
+When summarizing:
+1. Use get_chat_history() to retrieve messages
+2. Identify the main topic or question
+3. Extract key points and arguments
+4. Note participants and their contributions
+5. Highlight any decisions or conclusions
+6. Format as structured markdown"""
+
+    async def format_output(self, text: str) -> str:
+        """Format thread summary output (markdown)."""
+        # Ensure proper markdown formatting
+        lines = []
+        for line in text.split('\n'):
+            stripped = line.strip()
+            if stripped:
+                lines.append(stripped)
+
+        formatted = '\n'.join(lines)
+
+        # Ensure Telegram limit
+        if len(formatted) > 4000:
+            formatted = formatted[:3950] + "\n\n... (обрезано)"
+
+        return formatted
+
+    # Legacy methods for backward compatibility
 
     async def execute(
         self,
@@ -59,7 +135,7 @@ class ThreadSummarySkill(BaseSkill):
         **kwargs
     ) -> SkillResult:
         """
-        Generate a thread summary.
+        Generate a thread summary (legacy method).
 
         Args:
             chat_id: Telegram chat ID
@@ -224,17 +300,7 @@ class ThreadSummarySkill(BaseSkill):
         message_id: int,
         language: str = "ru"
     ) -> SkillResult:
-        """
-        Summarize the reply chain starting from a message.
-
-        Args:
-            chat_id: Telegram chat ID
-            message_id: Starting message ID
-            language: Summary language
-
-        Returns:
-            SkillResult with reply chain summary
-        """
+        """Summarize the reply chain starting from a message."""
         return await self.execute(
             chat_id=chat_id,
             message_id=message_id,
@@ -247,17 +313,7 @@ class ThreadSummarySkill(BaseSkill):
         count: int = 20,
         language: str = "ru"
     ) -> SkillResult:
-        """
-        Summarize recent messages.
-
-        Args:
-            chat_id: Telegram chat ID
-            count: Number of recent messages
-            language: Summary language
-
-        Returns:
-            SkillResult with recent messages summary
-        """
+        """Summarize recent messages."""
         return await self.execute(
             chat_id=chat_id,
             message_id=None,
