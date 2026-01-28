@@ -163,20 +163,21 @@ async def cmd_settings(message: Message, db: Database) -> None:
     chat_id = message.chat.id
 
     # Ensure chat exists in database first (fixes FOREIGN KEY constraint)
-    await db.get_or_create_chat(
+    chat = await db.get_or_create_chat(
         chat_id=chat_id,
         title=message.chat.title or message.chat.first_name or "Private Chat",
         chat_type=message.chat.type
     )
+    internal_id = chat["id"]  # Use internal id for chat_settings
 
     # Get current settings
     settings = await db.get_chat_settings(chat_id)
     if settings is None:
-        # Initialize default settings
+        # Initialize default settings (using internal id)
         async with db.get_connection() as conn:
             await conn.execute(
                 "INSERT OR IGNORE INTO chat_settings (chat_id) VALUES (?)",
-                (chat_id,)
+                (internal_id,)
             )
             await conn.commit()
         settings = await db.get_chat_settings(chat_id)

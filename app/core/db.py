@@ -1009,11 +1009,29 @@ class Database:
     # === Settings ===
 
     async def get_chat_settings(self, chat_id: int) -> Optional[Dict[str, Any]]:
-        """Get chat settings."""
+        """
+        Get chat settings by Telegram chat_id.
+
+        Note: chat_settings.chat_id references chats(id), not chats(chat_id).
+        This function translates Telegram chat_id to internal chats.id.
+        """
         async with self.get_connection() as db:
+            # First, find the internal chats.id for this Telegram chat_id
+            cursor = await db.execute(
+                "SELECT id FROM chats WHERE chat_id = ?",
+                (chat_id,)
+            )
+            chat_row = await cursor.fetchone()
+
+            if not chat_row:
+                return None
+
+            internal_id = chat_row[0]
+
+            # Now get settings using the internal id
             cursor = await db.execute(
                 "SELECT * FROM chat_settings WHERE chat_id = ?",
-                (chat_id,)
+                (internal_id,)
             )
             row = await cursor.fetchone()
 
@@ -1029,19 +1047,36 @@ class Database:
         updates: Dict[str, Any]
     ) -> None:
         """
-        Update chat settings (partial update).
+        Update chat settings (partial update) by Telegram chat_id.
         Creates row if doesn't exist.
 
         v2.1: Supports both legacy boolean format and new enabled_skills JSON format.
+
+        Note: chat_settings.chat_id references chats(id), not chats(chat_id).
+        This function translates Telegram chat_id to internal chats.id.
         """
         if not updates:
             return
 
         async with self.get_connection() as db:
-            # First check if settings exist
+            # First, find the internal chats.id for this Telegram chat_id
+            cursor = await db.execute(
+                "SELECT id FROM chats WHERE chat_id = ?",
+                (chat_id,)
+            )
+            chat_row = await cursor.fetchone()
+
+            if not chat_row:
+                # Chat doesn't exist, can't update settings
+                logger.warning(f"Cannot update settings for non-existent chat {chat_id}")
+                return
+
+            internal_id = chat_row[0]
+
+            # First check if settings exist (using internal id)
             cursor = await db.execute(
                 "SELECT chat_id FROM chat_settings WHERE chat_id = ?",
-                (chat_id,)
+                (internal_id,)
             )
             exists = await cursor.fetchone() is not None
 
@@ -1050,7 +1085,7 @@ class Database:
             if exists:
                 cursor = await db.execute(
                     "SELECT * FROM chat_settings WHERE chat_id = ?",
-                    (chat_id,)
+                    (internal_id,)
                 )
                 row = await cursor.fetchone()
                 columns = [desc[0] for desc in cursor.description]
@@ -1075,13 +1110,13 @@ class Database:
                         current_enabled.append("coach")
                 enabled_skills = json.dumps(current_enabled)
 
-            # Update insert
+            # Update insert (using internal id)
             if exists:
                 # Update existing row
                 if enabled_skills is not None:
                     await db.execute(
                         "UPDATE chat_settings SET enabled_skills = ? WHERE chat_id = ?",
-                        (enabled_skills, chat_id)
+                        (enabled_skills, internal_id)
                     )
 
                 # Update other fields if provided
@@ -1091,13 +1126,13 @@ class Database:
                                            if k not in ["enabled_skills", "summary_enabled", "coach_enabled"]}
                     if remaining_updates:
                         set_clause = ", ".join(f"{k} = ?" for k in remaining_updates.keys())
-                        values = list(remaining_updates.values()) + [chat_id]
+                        values = list(remaining_updates.values()) + [internal_id]
                         await db.execute(
                             f"UPDATE chat_settings SET {set_clause} WHERE chat_id = ?",
                             values
                         )
             else:
-                # Insert new row
+                # Insert new row (using internal id)
                 all_values = {
                     "enabled_skills": enabled_skills or '["summary", "coach", "qa", "analytics"]',
                 }
@@ -1110,7 +1145,7 @@ class Database:
                 placeholders = ", ".join(["?"] * len(columns))
                 await db.execute(
                     f"INSERT INTO chat_settings (chat_id, {', '.join(columns)}) VALUES (?, {placeholders})",
-                    [chat_id] + list(all_values.values())
+                    [internal_id] + list(all_values.values())
                 )
 
             await db.commit()
