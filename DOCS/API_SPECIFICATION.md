@@ -1,680 +1,967 @@
 # API_SPECIFICATION.md
 
-**Версия:** 1.0  
-**Дата:** 2026-01-25  
-**Проект:** Telegram Chat Analytics & Coaching Bot v2.0
+**Версия:** 2.0  
+**Дата:** 2026-01-28  
+**Base URL:** `http://localhost:8000/api`  
+**Формат:** JSON
 
 ---
 
-## 1. Обзор API
+## 1. Обзор
 
-FastAPI REST API для веб-интерфейса бота:
-- **Base URL:** `http://localhost:8000` (dev), `https://yourdomain.com` (prod)
-- **Формат данных:** JSON
-- **Авторизация:** JWT Bearer token (после Telegram OAuth)
-- **Rate limiting:** 10 req/min для обычных эндпоинтов, 30 req/min для SQL-агента
-- **CORS:** Настраивается в `web/middleware.py`
+REST API для веб-интерфейса Telegram Chat Analytics Bot.
+
+### Ключевые особенности
+
+- 🔐 **Telegram-native 2FA** - аутентификация через OTP в Telegram
+- 🔑 **JWT токены** - Bearer authentication
+- 📊 **Статистика и аналитика** - данные чатов
+- 🎛️ **Управление Skills** - включение/выключение навыков
+- 📤 **Экспорт данных** - CSV формат
+- ⚡ **Rate Limiting** - защита от злоупотреблений
 
 ---
 
 ## 2. Аутентификация
 
-### 2.1 Telegram OAuth Login
+### 2.1 Flow диаграмма
 
-**POST** `/api/v1/auth/telegram`
+```
+┌──────────────────────────────────────────────┐
+│ 1. POST /api/auth/request-otp                │
+│    Body: {"telegram_id": 123456789}          │
+│    ↓                                          │
+│    Response: {"message": "OTP sent"}         │
+└──────────────────────────────────────────────┘
+                    ↓
+┌──────────────────────────────────────────────┐
+│ 2. Telegram Bot отправляет код в личку       │
+│    "🔐 Код для входа: 123456"               │
+└──────────────────────────────────────────────┘
+                    ↓
+┌──────────────────────────────────────────────┐
+│ 3. POST /api/auth/verify-otp                 │
+│    Body: {"telegram_id": 123456789,          │
+│            "otp": "123456"}                  │
+│    ↓                                          │
+│    Response: {"access_token": "eyJ..."}      │
+└──────────────────────────────────────────────┘
+                    ↓
+┌──────────────────────────────────────────────┐
+│ 4. Все запросы с Header:                     │
+│    Authorization: Bearer eyJ...              │
+└──────────────────────────────────────────────┘
+```
 
-Вход через Telegram Login Widget.
+### 2.2 Request OTP
 
-**Request Body:**
+**Endpoint:** `POST /api/auth/request-otp`
+
+**Описание:** Генерирует и отправляет OTP код пользователю в Telegram.
+
+**Request:**
+
 ```json
 {
-  "id": 123456789,
-  "first_name": "Ivan",
-  "username": "ivan_user",
-  "auth_date": 1706198400,
-  "hash": "abc123def456..."
+  "telegram_id": 123456789
 }
 ```
 
-**Response 200:**
+**Response (200 OK):**
+
+```json
+{
+  "message": "OTP sent to your Telegram",
+  "expires_in": 300
+}
+```
+
+**Response (401 Unauthorized):**
+
+```json
+{
+  "detail": "User not found or not authorized for web access"
+}
+```
+
+**Response (429 Too Many Requests):**
+
+```json
+{
+  "detail": "Too many requests. Try again in 60 seconds"
+}
+```
+
+**Rate Limiting:** 3 запроса в минуту на один telegram_id
+
+---
+
+### 2.3 Verify OTP
+
+**Endpoint:** `POST /api/auth/verify-otp`
+
+**Описание:** Проверяет OTP код и возвращает JWT токен.
+
+**Request:**
+
+```json
+{
+  "telegram_id": 123456789,
+  "otp": "123456"
+}
+```
+
+**Response (200 OK):**
+
 ```json
 {
   "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
   "token_type": "bearer",
-  "user_id": 123456789,
-  "username": "ivan_user"
+  "expires_in": 604800
 }
 ```
 
-**Errors:**
-- `401 Unauthorized` - неверная подпись hash
-- `500 Internal Server Error` - ошибка создания токена
+**Response (401 Unauthorized):**
 
----
-
-### 2.2 Superadmin Login
-
-**POST** `/api/v1/auth/superadmin`
-
-Вход суперадмина по паролю.
-
-**Request Body:**
 ```json
 {
-  "password": "your_secure_password"
+  "detail": "Invalid or expired OTP"
 }
 ```
 
-**Response 200:**
-```json
-{
-  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "token_type": "bearer"
-}
-```
-
-**Errors:**
-- `401 Unauthorized` - неверный пароль
+**Rate Limiting:** 5 попыток в минуту
 
 ---
 
-### 2.3 Использование токенов
+### 2.4 Get Current User
 
-Все защищённые эндпоинты требуют заголовок:
+**Endpoint:** `GET /api/auth/me`
 
-```http
-Authorization: Bearer <access_token>
-```
-
-**Срок жизни токена:** 7 дней (настраивается в `JWT_EXPIRE_MINUTES`).
-
----
-
-## 3. Чаты
-
-### 3.1 Получить список чатов пользователя
-
-**GET** `/api/v1/chats`
-
-Возвращает список чатов, где пользователь является участником.
+**Описание:** Получить информацию о текущем пользователе.
 
 **Headers:**
-```http
+
+```
 Authorization: Bearer <token>
 ```
 
-**Response 200:**
+**Response (200 OK):**
+
 ```json
 {
-  "chats": [
-    {
-      "id": -1001234567890,
-      "title": "Team Chat",
-      "type": "supergroup",
-      "member_count": 15,
-      "message_count": 3420,
-      "last_activity": "2026-01-25T10:30:00Z",
-      "role": "admin"
-    },
-    {
-      "id": -1009876543210,
-      "title": "Project Alpha",
-      "type": "group",
-      "member_count": 8,
-      "message_count": 1250,
-      "last_activity": "2026-01-24T18:15:00Z",
-      "role": "member"
-    }
-  ]
+  "id": 123456789,
+  "username": "vitya",
+  "full_name": "Виктор",
+  "is_web_admin": true,
+  "language_code": "ru",
+  "last_seen": "2026-01-28T09:30:00Z"
 }
 ```
 
 ---
 
-### 3.2 Получить историю чата
+## 3. Статистика
 
-**GET** `/api/v1/chat/{chat_id}/history`
+### 3.1 Get Statistics
 
-Получить сообщения чата с опциональным полнотекстовым поиском.
+**Endpoint:** `GET /api/stats/messages`
 
-**Path Parameters:**
-- `chat_id` (integer) - ID чата
+**Описание:** Получить статистику сообщений.
+
+**Headers:**
+
+```
+Authorization: Bearer <token>
+```
 
 **Query Parameters:**
-- `limit` (integer, default=100, max=500) - кол-во сообщений
-- `offset` (integer, default=0) - смещение для пагинации
-- `search` (string, optional) - FTS-поиск по содержимому
 
-**Headers:**
-```http
-Authorization: Bearer <token>
+| Параметр | Тип | Обязательный | Default | Описание |
+|----------|-----|--------------|---------|----------|
+| chat_id | integer | нет | null | ID чата (если null - все чаты) |
+| days | integer | нет | 7 | За последние N дней |
+
+**Request:**
+
+```
+GET /api/stats/messages?chat_id=1&days=30
 ```
 
-**Response 200:**
+**Response (200 OK):**
+
 ```json
 {
-  "messages": [
-    {
-      "id": 12345,
-      "message_id": 67890,
-      "user_id": 123456789,
-      "username": "ivan_user",
-      "content": "Расшифрованный текст сообщения",
-      "timestamp": "2026-01-25T10:30:00Z",
-      "is_deleted": false
-    },
-    {
-      "id": 12346,
-      "message_id": 67891,
-      "user_id": 987654321,
-      "username": "anna_user",
-      "content": "Ответ на сообщение",
-      "timestamp": "2026-01-25T10:31:00Z",
-      "is_deleted": false
-    }
-  ],
-  "total": 3420,
-  "offset": 0,
-  "limit": 100
-}
-```
-
-**Errors:**
-- `403 Forbidden` - пользователь не является членом чата
-- `404 Not Found` - чат не существует
-
----
-
-### 3.3 Полнотекстовый поиск
-
-**GET** `/api/v1/chat/{chat_id}/search`
-
-FTS5-поиск по сообщениям чата.
-
-**Path Parameters:**
-- `chat_id` (integer) - ID чата
-
-**Query Parameters:**
-- `query` (string, required) - поисковый запрос
-- `limit` (integer, default=50, max=200)
-- `offset` (integer, default=0)
-
-**Headers:**
-```http
-Authorization: Bearer <token>
-```
-
-**Response 200:**
-```json
-{
-  "results": [
-    {
-      "id": 12345,
-      "message_id": 67890,
-      "user_id": 123456789,
-      "username": "ivan_user",
-      "content": "Текст с выделенным совпадением",
-      "timestamp": "2026-01-25T10:30:00Z",
-      "rank": 0.85
-    }
-  ],
-  "total": 42,
-  "query": "проект дедлайн"
-}
-```
-
----
-
-### 3.4 Экспорт чата
-
-**POST** `/api/v1/chat/{chat_id}/export`
-
-Экспорт истории чата в TXT файл.
-
-**Path Parameters:**
-- `chat_id` (integer) - ID чата
-
-**Headers:**
-```http
-Authorization: Bearer <token>
-```
-
-**Response 200:**
-```json
-{
-  "download_url": "/api/v1/download/export_12345_20260125.txt",
-  "expires_at": "2026-01-25T15:00:00Z"
-}
-```
-
-Ссылка действительна 1 час.
-
-**Errors:**
-- `403 Forbidden` - только админы чата могут экспортировать
-
----
-
-## 4. SQL-агент
-
-### 4.1 Задать вопрос к данным чата
-
-**POST** `/api/v1/chat/query`
-
-SQL-агент для NLP → SQL → результат.
-
-**Headers:**
-```http
-Authorization: Bearer <token>
-```
-
-**Request Body:**
-```json
-{
-  "chat_id": -1001234567890,
-  "question": "Кто больше всех написал сообщений на этой неделе?"
-}
-```
-
-**Response 200:**
-```json
-{
-  "answer": "На этой неделе больше всех сообщений (42) написал пользователь @ivan_user.",
-  "sql_query": "SELECT u.username, COUNT(*) as msg_count FROM messages m JOIN users u ON m.user_id = u.id WHERE m.chat_id = -1001234567890 AND m.timestamp >= date('now', '-7 days') GROUP BY u.username ORDER BY msg_count DESC LIMIT 1",
-  "execution_time_ms": 145
-}
-```
-
-**Errors:**
-- `403 Forbidden` - нет доступа к чату
-- `400 Bad Request` - небезопасный SQL или ошибка генерации
-- `429 Too Many Requests` - превышен rate limit (30 req/min)
-
----
-
-## 5. Настройки чата
-
-### 5.1 Получить настройки
-
-**GET** `/api/v1/settings/{chat_id}`
-
-Получить настройки чата (summary, coach, язык).
-
-**Headers:**
-```http
-Authorization: Bearer <token>
-```
-
-**Response 200:**
-```json
-{
-  "summary_enabled": true,
-  "summary_time_local": "16:00",
-  "summary_timezone": "Europe/Moscow",
-  "summary_custom_prompt": "",
-  "summary_target": "chat",
-
-  "coach_enabled": true,
-  "coach_custom_prompt": "Анализируй тон сообщений",
-  "coach_target": "chat",
-
-  "language": "ru"
-}
-```
-
-**Errors:**
-- `403 Forbidden` - только админы чата могут просматривать настройки
-
----
-
-### 5.2 Обновить настройки
-
-**PUT** `/api/v1/settings/{chat_id}`
-
-Обновить настройки чата (partial update).
-
-**Headers:**
-```http
-Authorization: Bearer <token>
-```
-
-**Request Body:**
-```json
-{
-  "summary_enabled": false,
-  "coach_custom_prompt": "Фокусируйся на конструктивности"
-}
-```
-
-**Response 200:**
-```json
-{
-  "status": "ok",
-  "updated_fields": ["summary_enabled", "coach_custom_prompt"]
-}
-```
-
-**Errors:**
-- `403 Forbidden` - только админы могут изменять настройки
-- `400 Bad Request` - невалидные значения
-
----
-
-## 6. Статистика (Superadmin)
-
-### 6.1 Глобальная статистика
-
-**GET** `/api/v1/admin/stats`
-
-Статистика по всем чатам БЕЗ доступа к контенту.
-
-**Headers:**
-```http
-Authorization: Bearer <superadmin_token>
-```
-
-**Response 200:**
-```json
-{
-  "total_users": 142,
-  "total_chats": 18,
-  "total_messages": 45320,
-  "tokens_by_skill": {
-    "summary": 1250000,
-    "coach": 340000,
-    "sql_agent": 180000,
-    "qa": 95000,
-    "thread_summary": 45000
+  "total_messages": 1523,
+  "total_users": 15,
+  "period": {
+    "start": "2025-12-29",
+    "end": "2026-01-28",
+    "days": 30
   },
-  "cost_usd_total": 12.45,
-  "per_user_stats": [
+  "top_users": [
     {
       "user_id": 123456789,
-      "username": "ivan_user",
-      "total_messages": 3420,
-      "chats_count": 3,
-      "tokens_used": 25000
-    }
-  ]
-}
-```
-
-**Errors:**
-- `403 Forbidden` - требуется роль superadmin
-
----
-
-### 6.2 Отправить уведомление пользователю
-
-**POST** `/api/v1/admin/notify`
-
-Отправить сообщение пользователю в Telegram.
-
-**Headers:**
-```http
-Authorization: Bearer <superadmin_token>
-```
-
-**Request Body:**
-```json
-{
-  "user_id": 123456789,
-  "message": "Ваш аккаунт будет приостановлен завтра из-за превышения лимита"
-}
-```
-
-**Response 200:**
-```json
-{
-  "status": "sent",
-  "timestamp": "2026-01-25T12:00:00Z"
-}
-```
-
-**Errors:**
-- `403 Forbidden` - требуется superadmin
-- `500 Internal Server Error` - ошибка отправки (пользователь заблокировал бота)
-
----
-
-### 6.3 Audit Log
-
-**GET** `/api/v1/admin/audit`
-
-Получить лог действий пользователей.
-
-**Headers:**
-```http
-Authorization: Bearer <superadmin_token>
-```
-
-**Query Parameters:**
-- `user_id` (integer, optional) - фильтр по пользователю
-- `action` (string, optional) - фильтр по типу действия
-- `limit` (integer, default=100, max=1000)
-- `offset` (integer, default=0)
-
-**Response 200:**
-```json
-{
-  "logs": [
-    {
-      "id": 12345,
-      "user_id": 123456789,
-      "action": "sql_query",
-      "chat_id": -1001234567890,
-      "details": {
-        "sql": "SELECT COUNT(*) FROM messages WHERE chat_id = -1001234567890",
-        "rows_returned": 1
-      },
-      "timestamp": "2026-01-25T11:30:00Z"
+      "username": "vitya",
+      "full_name": "Виктор",
+      "message_count": 342,
+      "percentage": 22.5
     },
     {
-      "id": 12346,
       "user_id": 987654321,
-      "action": "export_chat",
-      "chat_id": -1009876543210,
-      "details": {},
-      "timestamp": "2026-01-25T10:15:00Z"
+      "username": "admin",
+      "full_name": "Администратор",
+      "message_count": 218,
+      "percentage": 14.3
     }
   ],
-  "total": 4532
-}
-```
-
----
-
-## 7. Health Check
-
-### 7.1 Health
-
-**GET** `/health`
-
-Проверка состояния API.
-
-**Response 200:**
-```json
-{
-  "status": "ok",
-  "version": "2.0.0",
-  "database": "connected",
-  "llm_service": "available"
-}
-```
-
-**Response 503:**
-```json
-{
-  "status": "error",
-  "database": "connection_failed",
-  "llm_service": "timeout"
-}
-```
-
----
-
-## 8. WebSocket (опционально, будущая фича)
-
-### 8.1 Подписка на новые сообщения
-
-**WebSocket** `/ws/chat/{chat_id}`
-
-Real-time поток новых сообщений чата.
-
-**Headers:**
-```http
-Authorization: Bearer <token>
-```
-
-**Incoming messages:**
-```json
-{
-  "type": "message",
-  "data": {
-    "id": 12347,
-    "message_id": 67892,
-    "user_id": 123456789,
-    "username": "ivan_user",
-    "content": "Новое сообщение",
-    "timestamp": "2026-01-25T12:00:00Z"
+  "messages_per_day": [
+    {"date": "2026-01-28", "count": 78},
+    {"date": "2026-01-27", "count": 65},
+    {"date": "2026-01-26", "count": 92}
+  ],
+  "messages_by_hour": {
+    "0": 5, "1": 2, "2": 0, "3": 1,
+    "9": 45, "10": 67, "11": 58,
+    "14": 72, "15": 81, "16": 69
   }
 }
 ```
 
-**Outgoing (ping):**
+---
+
+## 4. Чаты
+
+### 4.1 List Chats
+
+**Endpoint:** `GET /api/chats`
+
+**Описание:** Получить список всех чатов.
+
+**Headers:**
+
+```
+Authorization: Bearer <token>
+```
+
+**Response (200 OK):**
+
 ```json
 {
-  "type": "ping"
+  "chats": [
+    {
+      "id": 1,
+      "chat_id": -1001234567890,
+      "title": "Команда разработки",
+      "chat_type": "supergroup",
+      "member_count": 15,
+      "is_active": true,
+      "last_message_at": "2026-01-28T09:30:00Z",
+      "total_messages": 1523
+    },
+    {
+      "id": 2,
+      "chat_id": -1009876543210,
+      "title": "Менеджмент",
+      "chat_type": "group",
+      "member_count": 8,
+      "is_active": true,
+      "last_message_at": "2026-01-28T08:15:00Z",
+      "total_messages": 892
+    }
+  ],
+  "total": 2
 }
 ```
 
 ---
 
-## 9. Rate Limiting
+### 4.2 Get Chat Details
 
-| Эндпоинт              | Лимит           |
-|-----------------------|-----------------|
-| `/api/v1/auth/*`      | 5 req/min       |
-| `/api/v1/chat/query`  | 30 req/min      |
-| `/api/v1/chat/*` (GET)| 60 req/min      |
-| `/api/v1/settings/*`  | 10 req/min      |
-| `/api/v1/admin/*`     | 100 req/min     |
-| WebSocket connections | 3 одновременно  |
+**Endpoint:** `GET /api/chats/{chat_id}`
 
-**Response при превышении:**
-```json
-{
-  "error": "Rate limit exceeded",
-  "retry_after": 45
-}
-```
+**Описание:** Подробная информация о чате.
 
-HTTP Status: `429 Too Many Requests`
+**Path Parameters:**
 
----
+| Параметр | Тип | Описание |
+|----------|-----|----------|
+| chat_id | integer | ID чата из таблицы chats |
 
-## 10. Ошибки
-
-### Общие коды
-
-| Код | Описание                  |
-|-----|---------------------------|
-| 200 | OK                        |
-| 201 | Created                   |
-| 400 | Bad Request               |
-| 401 | Unauthorized              |
-| 403 | Forbidden                 |
-| 404 | Not Found                 |
-| 429 | Too Many Requests         |
-| 500 | Internal Server Error     |
-| 503 | Service Unavailable       |
-
-### Формат ошибок
+**Response (200 OK):**
 
 ```json
 {
-  "error": "Forbidden",
-  "message": "You are not a member of this chat",
-  "code": "CHAT_ACCESS_DENIED",
-  "timestamp": "2026-01-25T12:00:00Z"
+  "id": 1,
+  "chat_id": -1001234567890,
+  "title": "Команда разработки",
+  "chat_type": "supergroup",
+  "description": "Основной чат команды",
+  "member_count": 15,
+  "is_active": true,
+  "created_at": "2025-06-15T10:00:00Z",
+  "settings": {
+    "enabled_skills": ["summary", "coach", "qa", "analytics"],
+    "summary_time": "16:00",
+    "summary_timezone": "Europe/Moscow",
+    "language": "ru"
+  },
+  "members": [
+    {
+      "user_id": 123456789,
+      "username": "vitya",
+      "full_name": "Виктор",
+      "role": "admin"
+    }
+  ]
 }
 ```
 
 ---
 
-## 11. Примеры использования
+## 5. Сообщения
 
-### 11.1 Python (httpx)
+### 5.1 Get Messages
+
+**Endpoint:** `GET /api/messages`
+
+**Описание:** Получить сообщения чата.
+
+**Query Parameters:**
+
+| Параметр | Тип | Обязательный | Default | Описание |
+|----------|-----|--------------|---------|----------|
+| chat_id | integer | да | - | ID чата |
+| days | integer | нет | 7 | За последние N дней |
+| limit | integer | нет | 50 | Макс. сообщений (max: 100) |
+| offset | integer | нет | 0 | Смещение для пагинации |
+
+**Request:**
+
+```
+GET /api/messages?chat_id=1&days=7&limit=20&offset=0
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "messages": [
+    {
+      "id": 1523,
+      "message_id": 45678,
+      "timestamp": "2026-01-28T09:30:15Z",
+      "user": {
+        "id": 123456789,
+        "username": "vitya",
+        "full_name": "Виктор"
+      },
+      "content": "Давайте обсудим дедлайн проекта",
+      "message_type": "text",
+      "is_edited": false,
+      "reply_to_message_id": null
+    },
+    {
+      "id": 1522,
+      "message_id": 45677,
+      "timestamp": "2026-01-28T09:28:42Z",
+      "user": {
+        "id": 987654321,
+        "username": "admin",
+        "full_name": "Администратор"
+      },
+      "content": "Готов к деплою",
+      "message_type": "text",
+      "is_edited": false,
+      "reply_to_message_id": 45670
+    }
+  ],
+  "total": 156,
+  "limit": 20,
+  "offset": 0,
+  "has_more": true
+}
+```
+
+---
+
+## 6. Сводки и Рекомендации
+
+### 6.1 Manual Summary
+
+**Endpoint:** `POST /api/summary/manual`
+
+**Описание:** Создать сводку чата вручную.
+
+**Query Parameters:**
+
+| Параметр | Тип | Обязательный | Default |
+|----------|-----|--------------|---------|
+| chat_id | integer | да | - |
+| days | integer | нет | 7 |
+
+**Request:**
+
+```
+POST /api/summary/manual?chat_id=1&days=7
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "summary": "## 📊 Период\n2026-01-21 - 2026-01-28\n\n## 🔥 Основные темы\n1. **Дедлайн проекта** (45 сообщений)\n   - Обсуждение сроков\n   - Риски задержки\n\n2. **Деплой** (32 сообщения)\n   - Подготовка к релизу\n   - Тестирование\n\n## ✅ Принятые решения\n- Перенос дедлайна на 15 февраля (@vitya, 2026-01-27)\n- Freeze кода 10 февраля\n\n## 💬 Активные участники\n1. @vitya - 78 сообщений\n2. @admin - 52 сообщения",
+  "recommendations": "✅ **Позитивное:**\n- Активное обсуждение проблем\n- Быстрое принятие решений\n\n⚠️ **Области улучшения:**\n- Много дублирования информации\n- Недостаточно документации решений\n\n💡 **Рекомендации:**\n1. Использовать pinned messages для важных решений\n2. Создать отдельный тред для технических вопросов\n3. Еженедельные статус-встречи",
+  "generated_at": "2026-01-28T09:45:00Z"
+}
+```
+
+---
+
+### 6.2 Send Summary to Chat
+
+**Endpoint:** `POST /api/summary/send`
+
+**Описание:** Создать и отправить сводку в Telegram чат.
+
+**Query Parameters:**
+
+| Параметр | Тип | Обязательный | Default |
+|----------|-----|--------------|---------|
+| chat_id | integer | да | - |
+| days | integer | нет | 7 |
+
+**Response (200 OK):**
+
+```json
+{
+  "message": "Summary sent to chat",
+  "chat_id": -1001234567890,
+  "message_id": 45690
+}
+```
+
+---
+
+## 7. Управление Skills
+
+### 7.1 Get Skills Status
+
+**Endpoint:** `GET /api/skills/{chat_id}`
+
+**Описание:** Получить статус Skills для чата.
+
+**Response (200 OK):**
+
+```json
+{
+  "chat_id": 1,
+  "enabled_skills": [
+    {
+      "name": "summary",
+      "display_name": "Ежедневные сводки",
+      "description": "Автоматические сводки чата",
+      "enabled": true
+    },
+    {
+      "name": "coach",
+      "display_name": "Коучинг",
+      "description": "Рекомендации по коммуникации",
+      "enabled": true
+    },
+    {
+      "name": "qa",
+      "display_name": "Вопрос-ответ",
+      "description": "Ответы на вопросы с контекстом",
+      "enabled": true
+    },
+    {
+      "name": "analytics",
+      "display_name": "Аналитика",
+      "description": "SQL-запросы и статистика",
+      "enabled": false
+    }
+  ]
+}
+```
+
+---
+
+### 7.2 Toggle Skill
+
+**Endpoint:** `POST /api/skills/{chat_id}/toggle`
+
+**Описание:** Включить/выключить Skill.
+
+**Request:**
+
+```json
+{
+  "skill_name": "analytics",
+  "enabled": true
+}
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "message": "Skill updated",
+  "skill_name": "analytics",
+  "enabled": true
+}
+```
+
+**Audit Log:** Действие логируется в `audit_log`.
+
+---
+
+## 8. Экспорт данных
+
+### 8.1 Export to CSV
+
+**Endpoint:** `GET /api/export/csv`
+
+**Описание:** Экспорт сообщений чата в CSV.
+
+**Query Parameters:**
+
+| Параметр | Тип | Обязательный | Default |
+|----------|-----|--------------|---------|
+| chat_id | integer | да | - |
+| days | integer | нет | 30 |
+
+**Request:**
+
+```
+GET /api/export/csv?chat_id=1&days=30
+```
+
+**Response (200 OK):**
+
+```
+Headers:
+  Content-Type: text/csv
+  Content-Disposition: attachment; filename="chat_1_2026-01-28.csv"
+
+Body (CSV):
+timestamp,user_id,username,full_name,message_type,content
+2026-01-28 09:30:15,123456789,vitya,Виктор,text,"Давайте обсудим дедлайн"
+2026-01-28 09:28:42,987654321,admin,Администратор,text,"Готов к деплою"
+```
+
+**Audit Log:** Экспорт логируется.
+
+---
+
+## 9. Health & Monitoring
+
+### 9.1 Health Check
+
+**Endpoint:** `GET /api/health`
+
+**Описание:** Проверка здоровья сервиса.
+
+**Response (200 OK):**
+
+```json
+{
+  "status": "healthy",
+  "timestamp": "2026-01-28T09:45:00Z",
+  "version": "2.0.0",
+  "components": {
+    "database": "ok",
+    "telegram_bot": "ok",
+    "llm_api": "ok"
+  },
+  "uptime_seconds": 86400
+}
+```
+
+**Response (503 Service Unavailable):**
+
+```json
+{
+  "status": "unhealthy",
+  "timestamp": "2026-01-28T09:45:00Z",
+  "components": {
+    "database": "ok",
+    "telegram_bot": "error",
+    "llm_api": "ok"
+  },
+  "error": "Telegram bot connection failed"
+}
+```
+
+---
+
+## 10. Модели данных (Pydantic)
+
+### 10.1 User
+
+```python
+from pydantic import BaseModel
+from datetime import datetime
+
+class User(BaseModel):
+    id: int
+    username: str | None
+    full_name: str
+    language_code: str = "ru"
+    is_web_admin: bool = False
+    last_seen: datetime | None
+```
+
+### 10.2 Chat
+
+```python
+class Chat(BaseModel):
+    id: int
+    chat_id: int
+    title: str
+    chat_type: str
+    member_count: int
+    is_active: bool
+    created_at: datetime
+```
+
+### 10.3 Message
+
+```python
+class Message(BaseModel):
+    id: int
+    message_id: int
+    timestamp: datetime
+    user: User
+    content: str
+    message_type: str = "text"
+    is_edited: bool = False
+    reply_to_message_id: int | None = None
+```
+
+### 10.4 Statistics
+
+```python
+class TopUser(BaseModel):
+    user_id: int
+    username: str | None
+    full_name: str
+    message_count: int
+    percentage: float
+
+class Statistics(BaseModel):
+    total_messages: int
+    total_users: int
+    period: dict
+    top_users: list[TopUser]
+    messages_per_day: list[dict]
+    messages_by_hour: dict
+```
+
+---
+
+## 11. Error Handling
+
+### 11.1 Стандартные коды ошибок
+
+| Код | Название | Описание |
+|-----|----------|----------|
+| 400 | Bad Request | Неверные параметры запроса |
+| 401 | Unauthorized | Отсутствует или невалидный токен |
+| 403 | Forbidden | Недостаточно прав |
+| 404 | Not Found | Ресурс не найден |
+| 422 | Unprocessable Entity | Ошибка валидации |
+| 429 | Too Many Requests | Превышен rate limit |
+| 500 | Internal Server Error | Ошибка сервера |
+
+### 11.2 Формат ошибки
+
+```json
+{
+  "detail": "Human-readable error message",
+  "error_code": "INVALID_OTP",
+  "timestamp": "2026-01-28T09:45:00Z"
+}
+```
+
+**Примеры:**
+
+```json
+{
+  "detail": "Invalid or expired OTP",
+  "error_code": "INVALID_OTP"
+}
+```
+
+```json
+{
+  "detail": "Chat not found",
+  "error_code": "CHAT_NOT_FOUND"
+}
+```
+
+```json
+{
+  "detail": "Rate limit exceeded. Try again in 60 seconds",
+  "error_code": "RATE_LIMIT_EXCEEDED"
+}
+```
+
+---
+
+## 12. Rate Limiting
+
+### 12.1 Лимиты
+
+| Endpoint | Лимит |
+|----------|-------|
+| `/auth/request-otp` | 3 req/min per telegram_id |
+| `/auth/verify-otp` | 5 req/min per telegram_id |
+| `/summary/manual` | 10 req/hour per user |
+| `/summary/send` | 5 req/hour per user |
+| `/export/csv` | 10 req/hour per user |
+| Остальные | 100 req/min per user |
+
+### 12.2 Headers
+
+При приближении к лимиту API возвращает headers:
+
+```
+X-RateLimit-Limit: 100
+X-RateLimit-Remaining: 45
+X-RateLimit-Reset: 1706434800
+```
+
+---
+
+## 13. Pagination
+
+Endpoints, возвращающие списки, поддерживают пагинацию:
+
+**Request:**
+
+```
+GET /api/messages?chat_id=1&limit=20&offset=40
+```
+
+**Response:**
+
+```json
+{
+  "messages": [...],
+  "total": 156,
+  "limit": 20,
+  "offset": 40,
+  "has_more": true
+}
+```
+
+---
+
+## 14. CORS
+
+**Разрешенные origins:**
+
+```python
+CORS_ORIGINS = [
+    "http://localhost:3000",  # Dev frontend
+    "http://localhost:8000",  # Production
+    "https://your-domain.com"
+]
+```
+
+**Разрешенные методы:**
+
+```
+GET, POST, PUT, DELETE, OPTIONS
+```
+
+**Разрешенные headers:**
+
+```
+Authorization, Content-Type
+```
+
+---
+
+## 15. WebSocket (Roadmap v2.1)
+
+**Планируется:**
+
+```
+WS /api/ws/chat/{chat_id}
+
+Events:
+- message.new
+- message.edited
+- message.deleted
+- summary.generated
+```
+
+**Пример:**
+
+```javascript
+const ws = new WebSocket('ws://localhost:8000/api/ws/chat/1');
+
+ws.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+
+  if (data.type === 'message.new') {
+    console.log('New message:', data.message);
+  }
+};
+```
+
+---
+
+## 16. Примеры использования
+
+### 16.1 JavaScript/TypeScript
+
+```typescript
+// Аутентификация
+async function login(telegramId: number) {
+  // 1. Request OTP
+  const otpResponse = await fetch('/api/auth/request-otp', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({telegram_id: telegramId})
+  });
+
+  // 2. Пользователь вводит код из Telegram
+  const otp = prompt('Введите код из Telegram:');
+
+  // 3. Verify OTP
+  const tokenResponse = await fetch('/api/auth/verify-otp', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({telegram_id: telegramId, otp})
+  });
+
+  const {access_token} = await tokenResponse.json();
+  localStorage.setItem('token', access_token);
+}
+
+// Получение статистики
+async function getStats(chatId: number, days: number = 7) {
+  const token = localStorage.getItem('token');
+
+  const response = await fetch(
+    `/api/stats/messages?chat_id=${chatId}&days=${days}`,
+    {
+      headers: {
+        'Authorization': `Bearer ${token}`
+      }
+    }
+  );
+
+  return await response.json();
+}
+```
+
+### 16.2 Python
 
 ```python
 import httpx
 
-# Login
-auth_response = httpx.post(
-    "http://localhost:8000/api/v1/auth/telegram",
-    json={
-        "id": 123456789,
-        "first_name": "Ivan",
-        "username": "ivan_user",
-        "auth_date": 1706198400,
-        "hash": "abc123..."
-    }
-)
-token = auth_response.json()["access_token"]
+class TelegramBotAPI:
+    def __init__(self, base_url: str):
+        self.base_url = base_url
+        self.token = None
 
-# Query SQL agent
-headers = {"Authorization": f"Bearer {token}"}
-query_response = httpx.post(
-    "http://localhost:8000/api/v1/chat/query",
-    headers=headers,
-    json={
-        "chat_id": -1001234567890,
-        "question": "Сколько сообщений было вчера?"
-    }
-)
-print(query_response.json()["answer"])
-```
+    async def login(self, telegram_id: int, otp: str):
+        async with httpx.AsyncClient() as client:
+            # Request OTP
+            await client.post(
+                f"{self.base_url}/auth/request-otp",
+                json={"telegram_id": telegram_id}
+            )
 
-### 11.2 JavaScript (fetch)
+            # Verify OTP
+            response = await client.post(
+                f"{self.base_url}/auth/verify-otp",
+                json={"telegram_id": telegram_id, "otp": otp}
+            )
+            data = response.json()
+            self.token = data["access_token"]
 
-```javascript
-// Login
-const authResponse = await fetch('http://localhost:8000/api/v1/auth/telegram', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    id: 123456789,
-    first_name: 'Ivan',
-    username: 'ivan_user',
-    auth_date: 1706198400,
-    hash: 'abc123...'
-  })
-});
-const { access_token } = await authResponse.json();
+    async def get_stats(self, chat_id: int, days: int = 7):
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{self.base_url}/stats/messages",
+                params={"chat_id": chat_id, "days": days},
+                headers={"Authorization": f"Bearer {self.token}"}
+            )
+            return response.json()
 
-// Get chats
-const chatsResponse = await fetch('http://localhost:8000/api/v1/chats', {
-  headers: { 'Authorization': `Bearer ${access_token}` }
-});
-const { chats } = await chatsResponse.json();
-console.log(chats);
+# Usage
+api = TelegramBotAPI("http://localhost:8000/api")
+await api.login(123456789, "123456")
+stats = await api.get_stats(chat_id=1, days=30)
 ```
 
 ---
 
-## 12. OpenAPI Specification
+## 17. Testing
 
-Полная OpenAPI 3.0 спецификация доступна по адресу:
+### 17.1 Pytest Examples
 
-**GET** `/openapi.json`
+```python
+import pytest
+from fastapi.testclient import TestClient
+from app.web.app import create_app
 
-Swagger UI:
+@pytest.fixture
+def client():
+    app = create_app()
+    return TestClient(app)
 
-**GET** `/docs`
+def test_health_check(client):
+    response = client.get("/api/health")
+    assert response.status_code == 200
+    assert response.json()["status"] == "healthy"
 
-ReDoc:
+def test_auth_flow(client, mocker):
+    # Mock OTP sending
+    mocker.patch("app.web.auth.send_otp_to_telegram")
 
-**GET** `/redoc`
+    # Request OTP
+    response = client.post(
+        "/api/auth/request-otp",
+        json={"telegram_id": 123456789}
+    )
+    assert response.status_code == 200
+
+    # Verify OTP (with mocked OTP)
+    response = client.post(
+        "/api/auth/verify-otp",
+        json={"telegram_id": 123456789, "otp": "123456"}
+    )
+    assert response.status_code == 200
+    assert "access_token" in response.json()
+```
 
 ---
 
-**Версия:** 1.0 | **Статус:** Ready for Development | **Дата:** 2026-01-25
+## 18. Заключение
+
+### Основные особенности API
+
+✅ **Простота** - RESTful дизайн  
+✅ **Безопасность** - Telegram 2FA + JWT  
+✅ **Производительность** - Rate limiting  
+✅ **Документация** - OpenAPI/Swagger  
+✅ **Мониторинг** - Health checks  
+✅ **Расширяемость** - WebSocket в roadmap  
+
+### Swagger UI
+
+API автоматически документируется через FastAPI:
+
+```
+http://localhost:8000/docs      - Swagger UI
+http://localhost:8000/redoc     - ReDoc
+```
+
+---
+
+**Версия:** 2.0 | **Дата:** 2026-01-28 | **Framework:** FastAPI 0.115+

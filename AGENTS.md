@@ -1,1270 +1,872 @@
-# 🤖 AGENTS.md - Инструкция для кодового агента
+# AGENTS.md
 
 **Версия:** 2.0  
-**Дата:** 2026-01-25  
-**Проект:** Telegram Chat Analytics & Coaching Bot v2.0
+**Дата:** 2026-01-28  
+**Назначение:** Руководство по разработке AI-агентов, Skills и Tools
 
 ---
 
-## 🎯 Цель проекта
+## 1. Введение в Agentic Architecture
 
-Корпоративный self-hosted Telegram бот с веб-интерфейсом для:
-- Аналитики приватных чатов с шифрованием
-- AI-коучинга коммуникаций
-- SQL-агента для разговора с данными чатов
-- Многопользовательского режима с авторизацией через Telegram
-
-**Целевая аудитория:** Корпоративный сектор (self-hosted решение).
-
----
-
-## ⚡ Принципы разработки
-
-### KISS (Keep It Simple, Stupid)
-- Минимум зависимостей
-- **SQLite с асинхронным доступом (aiosqlite)**
-- Один процесс для бота + API (asyncio)
-- **Очередь задач как таблица в БД (не Celery, не Redis)**
-- Нет Redis, Celery - все в памяти через asyncio.Queue
-
-### DRY (Don't Repeat Yourself)
-- Базовые классы для Skills (`core/skills/base.py`)
-- Единый LLM client для всех модулей
-- Переиспользуемые middleware (auth, chat access)
-- Общие утилиты шифрования
-
-### Готовность к миграции
-- **SQLite now, PostgreSQL ready**
-- Код не зависит от конкретной БД (abstraction layer)
-- SQLAlchemy async для будущей миграции
-
-### Безопасность
-- **Шифрование at rest:** AES-256 per-chat encryption
-- **Авторизация:** Telegram OAuth + JWT
-- **Доступ:** RBAC - пользователь видит только свои чаты
-- **SQL-агент:** Только SELECT, обязательный WHERE chat_id=X
-- **Audit log:** Все действия админов и пользователей
-
----
-
-## 📁 Структура проекта
+Наша система использует **трехуровневую агентную архитектуру**, основанную на best practices от Anthropic:
 
 ```
-telegram_chanel_agg/
-├── main.py                    # Entry point (FastAPI + Bot startup)
-├── config.py                  # Pydantic settings
-├── requirements.txt           # Dependencies
-├── Dockerfile                 # Docker config
-├── docker-compose.yml         # Deployment
-├── .env.example              # Template
-│
-├── core/                      # 🔧 Core functionality
-│   ├── __init__.py
-│   ├── db.py                 # Database + FTS setup + queue table
-│   ├── crypto.py             # Encryption/decryption
-│   ├── llm.py                # OpenAI-compatible LLM client
-│   ├── sql_agent.py          # Safe SQL generation + execution
-│   ├── i18n.py               # Multilang support (ru/en)
-│   └── rate_limiter.py       # Telegram rate limit handler (asyncio.Queue)
-│
-├── bot/                       # 🤖 Telegram Bot
-│   ├── __init__.py
-│   ├── handlers.py           # Message handlers
-│   ├── commands.py           # Bot commands (/stats, /export, etc)
-│   ├── auth.py               # Telegram OAuth for web
-│   ├── scheduler.py          # APScheduler tasks (summary, retention)
-│   └── private_chat.py       # Private chat handlers (SQL-agent mode)
-│
-├── web/                       # 🌐 FastAPI Web Interface
-│   ├── __init__.py
-│   ├── main.py               # FastAPI app
-│   ├── middleware.py         # Auth, CORS, rate limiting
-│   ├── routes/
-│   │   ├── auth.py           # Login endpoints
-│   │   ├── admin.py          # Superadmin panel
-│   │   ├── chat.py           # SQL-agent chat interface
-│   │   ├── settings.py       # Chat settings (summary/coach config)
-│   │   └── export.py         # Export chat history
-│   └── models.py             # Pydantic request/response models
-│
-├── skills/                    # 🎓 Bot Skills (extensible)
-│   ├── __init__.py
-│   ├── base.py               # Abstract Skill class
-│   ├── summary.py            # Daily summary skill
-│   ├── coach.py              # Communication coach skill
-│   └── thread_summary.py     # Thread summarization skill
-│
-├── tests/                     # 🧪 Tests
-│   ├── test_crypto.py
-│   ├── test_sql_agent.py
-│   └── test_api.py
-│
-└── docs/                      # 📚 Documentation
-    ├── TECHNICAL_SPEC.md
-    ├── DATABASE_SCHEMA.md
-    ├── API_SPECIFICATION.md
-    ├── SECURITY_GUIDE.md
-    └── CHANGELOG.md
+┌────────────────────────────────────┐
+│   Level 1: Router Agent            │
+│   Задача: Классификация запроса    │
+│   Выход: Выбор Skill                │
+└────────────────┬───────────────────┘
+                 │
+┌────────────────▼───────────────────┐
+│   Level 2: Skill Agent             │
+│   Задача: Исполнение навыка        │
+│   Выход: Вызовы Tools               │
+└────────────────┬───────────────────┘
+                 │
+┌────────────────▼───────────────────┐
+│   Level 3: Tools Execution         │
+│   Задача: Низкоуровневые операции  │
+│   Выход: Данные для агента          │
+└────────────────────────────────────┘
 ```
+
+### Почему именно эта архитектура?
+
+1. **Разделение ответственности:** Каждый уровень решает свою задачу
+2. **Тестируемость:** Skills и Tools можно тестировать изолированно
+3. **Расширяемость:** Добавление нового Skill не влияет на Router
+4. **Безопасность:** Tools контролируют доступ к данным
+5. **Экономия токенов:** Router использует минимальный промпт
 
 ---
 
-## 🛠️ Технологический стек
+## 2. Router Agent
 
-### Обязательные библиотеки
+### 2.1 Назначение
 
-```txt
-# requirements.txt
+**Router Agent** - это легковесный классификатор, который определяет **намерение пользователя** и выбирает подходящий **Skill**.
 
-# === Web Framework ===
-fastapi>=0.109.0
-uvicorn[standard]>=0.27.0
-python-multipart>=0.0.6
-pydantic>=2.5.0
-pydantic-settings>=2.1.0
-
-# === Telegram Bot ===
-aiogram>=3.4.0              # Async Telegram bot framework
-python-telegram-bot>=20.7   # Alternative (optional)
-
-# === Database ===
-aiosqlite>=0.19.0           # Async SQLite
-sqlalchemy>=2.0.0           # ORM (ready for PostgreSQL migration)
-
-# === Encryption ===
-cryptography>=42.0.0        # Fernet for AES-256
-
-# === HTTP Client ===
-httpx>=0.26.0               # Async HTTP (for LLM API calls)
-
-# === Scheduling ===
-apscheduler>=3.10.0         # Scheduled tasks
-
-# === Security ===
-slowapi>=0.1.9              # Rate limiting
-python-jose[cryptography]   # JWT tokens
-passlib[bcrypt]             # Password hashing
-
-# === Templates (for web interface) ===
-jinja2>=3.1.3               # HTML templates
-
-# === Utilities ===
-python-dotenv>=1.0.0        # .env support
-pytz>=2024.1                # Timezone support
-```
-
-**ВАЖНО:** Нет Redis, нет Celery, нет pgvector (пока). Очередь = таблица в SQLite.
-
----
-
-## 🔑 Конфигурация (config.py)
+### 2.2 Принцип работы
 
 ```python
-from pydantic_settings import BaseSettings
-from typing import Optional
+# Входные данные
+user_query = "Сколько сообщений написал Витя вчера?"
 
-class Settings(BaseSettings):
-    # === Telegram ===
-    telegram_bot_token: str
-    telegram_webhook_url: Optional[str] = None  # Для webhook (опционально)
-    
-    # === LLM (OpenAI-compatible API) ===
-    llm_base_url: str = "https://openrouter.ai/api/v1"
-    llm_api_key: str
-    llm_model_name: str = "anthropic/claude-3.5-sonnet"
-    llm_max_tokens: int = 4000
-    llm_temperature: float = 0.7
-    llm_timeout: int = 60  # seconds
-    
-    # === Security ===
-    encryption_master_key: str  # Base64-encoded 32 bytes
-    jwt_secret_key: str
-    jwt_algorithm: str = "HS256"
-    jwt_expire_minutes: int = 10080  # 7 дней
-    superadmin_password_hash: str  # Bcrypt hash
-    
-    # === Database ===
-    database_url: str = "sqlite+aiosqlite:///./data/chat_data.db"
-    database_path: str = "data/chat_data.db"  # Для чистого SQLite
-    
-    # === Features ===
-    retention_days: int = 90
-    summary_time_utc: str = "13:00"  # 16:00 MSK
-    default_language: str = "ru"
-    context_messages: int = 20  # Для QA контекста
-    
-    # === Rate Limiting ===
-    telegram_global_rate: int = 30  # msg/sec глобально
-    telegram_per_chat_rate: float = 1.0  # msg/sec per chat
-    api_rate_limit: str = "10/minute"
-    
-    # === Server ===
-    host: str = "0.0.0.0"
-    port: int = 8000
-    debug: bool = False
-    
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
+# Router анализирует запрос
+skill = router.route(user_query, chat_id)
+# skill = "analytics"
 
-settings = Settings()
+# Skill выполняется
+result = skill_agent.execute(skill, user_query)
 ```
 
----
+### 2.3 Реализация Router Agent
 
-## 🗄️ База данных (SQLite + FTS)
+Файл: `app/core/router.py`
 
-### Основные таблицы
+Ключевые методы:
+- `route(query, chat_id)` - выбор Skill
+- `_build_router_prompt()` - формирование промпта
+- `_get_available_skills()` - проверка enabled skills
 
-```sql
--- === USERS ===
-CREATE TABLE users (
-    id INTEGER PRIMARY KEY,          -- Telegram user_id
-    username TEXT,
-    first_name TEXT,
-    last_name TEXT,
-    language_code TEXT DEFAULT 'ru',
-    is_superadmin BOOLEAN DEFAULT 0,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- === CHATS ===
-CREATE TABLE chats (
-    id INTEGER PRIMARY KEY,          -- Telegram chat_id
-    title TEXT NOT NULL,
-    type TEXT NOT NULL,              -- 'group', 'supergroup'
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    deleted_at TIMESTAMP             -- Soft delete при удалении бота
-);
-
--- === CHAT MEMBERS ===
-CREATE TABLE chat_members (
-    chat_id INTEGER NOT NULL,
-    user_id INTEGER NOT NULL,
-    role TEXT DEFAULT 'member',      -- 'admin', 'member'
-    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    left_at TIMESTAMP,               -- NULL если активен
-    PRIMARY KEY (chat_id, user_id),
-    FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE,
-    FOREIGN KEY (user_id) REFERENCES users(id)
-);
-
--- === MESSAGES (зашифрованы) ===
-CREATE TABLE messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    message_id INTEGER NOT NULL,     -- Telegram message_id
-    chat_id INTEGER NOT NULL,
-    user_id INTEGER NOT NULL,
-    content_encrypted TEXT,          -- AES-256 encrypted
-    timestamp TIMESTAMP NOT NULL,
-    is_deleted BOOLEAN DEFAULT 0,
-    deleted_at TIMESTAMP,
-    FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE,
-    FOREIGN KEY (user_id) REFERENCES users(id),
-    UNIQUE (chat_id, message_id)
-);
-
--- === FULL-TEXT SEARCH (FTS5 для русского текста) ===
-CREATE VIRTUAL TABLE messages_fts USING fts5(
-    message_id UNINDEXED,
-    chat_id UNINDEXED,
-    content,
-    tokenize='unicode61 remove_diacritics 2'
-);
-
--- === CHAT SETTINGS ===
-CREATE TABLE chat_settings (
-    chat_id INTEGER PRIMARY KEY,
-    summary_enabled BOOLEAN DEFAULT 1,
-    summary_time_local TEXT DEFAULT '16:00',
-    summary_timezone TEXT DEFAULT 'Europe/Moscow',
-    summary_custom_prompt TEXT,
-    summary_target TEXT DEFAULT 'chat',  -- 'chat', 'bot', 'disabled'
-    
-    coach_enabled BOOLEAN DEFAULT 1,
-    coach_custom_prompt TEXT,
-    coach_target TEXT DEFAULT 'chat',
-    
-    language TEXT DEFAULT 'ru',
-    FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
-);
-
--- === LLM USAGE TRACKING ===
-CREATE TABLE llm_usage (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    chat_id INTEGER,
-    skill TEXT NOT NULL,             -- 'summary', 'coach', 'sql_agent', 'thread_summary', 'qa'
-    tokens_prompt INTEGER,
-    tokens_completion INTEGER,
-    cost_usd REAL,
-    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (chat_id) REFERENCES chats(id),
-    FOREIGN KEY (user_id) REFERENCES users(id)
-);
-
--- === AUDIT LOG ===
-CREATE TABLE audit_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,                 -- NULL для system actions
-    action TEXT NOT NULL,            -- 'sql_query', 'export_chat', 'change_settings', 'admin_notify', etc
-    chat_id INTEGER,
-    details TEXT,                    -- JSON string
-    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(id),
-    FOREIGN KEY (chat_id) REFERENCES chats(id)
-);
-
--- === TASK QUEUE (для асинхронных задач вместо Celery) ===
-CREATE TABLE task_queue (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_type TEXT NOT NULL,         -- 'send_summary', 'export_chat', 'cleanup', etc
-    chat_id INTEGER,
-    user_id INTEGER,
-    payload TEXT,                    -- JSON string с параметрами
-    status TEXT DEFAULT 'pending',   -- 'pending', 'processing', 'completed', 'failed'
-    retry_count INTEGER DEFAULT 0,
-    max_retries INTEGER DEFAULT 3,
-    error_message TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    started_at TIMESTAMP,
-    completed_at TIMESTAMP,
-    FOREIGN KEY (chat_id) REFERENCES chats(id),
-    FOREIGN KEY (user_id) REFERENCES users(id)
-);
-
--- === INDEXES ===
-CREATE INDEX idx_messages_chat_time ON messages(chat_id, timestamp DESC);
-CREATE INDEX idx_messages_user ON messages(user_id);
-CREATE INDEX idx_messages_deleted ON messages(is_deleted, deleted_at);
-CREATE INDEX idx_chat_members_user ON chat_members(user_id);
-CREATE INDEX idx_chat_members_active ON chat_members(user_id, left_at);
-CREATE INDEX idx_llm_usage_chat ON llm_usage(chat_id, timestamp);
-CREATE INDEX idx_llm_usage_user ON llm_usage(user_id, timestamp);
-CREATE INDEX idx_audit_log_user ON audit_log(user_id, timestamp);
-CREATE INDEX idx_audit_log_chat ON audit_log(chat_id, timestamp);
-CREATE INDEX idx_task_queue_status ON task_queue(status, created_at);
-```
-
----
-
-## 🔐 Шифрование (core/crypto.py)
-
-### Требования
-- **Per-chat encryption:** Каждый чат = уникальный ключ (derived от master key)
-- **Алгоритм:** Fernet (AES-128-CBC + HMAC-SHA256)
-- **Master key:** 32 байта, base64-encoded в `ENCRYPTION_MASTER_KEY`
-
-### Реализация
+**Пример кода:**
 
 ```python
-# core/crypto.py
-from cryptography.fernet import Fernet
-import base64
-from hashlib import sha256
+class RouterAgent:
+    def __init__(self, llm_client, database):
+        self.llm = llm_client
+        self.db = database
 
-class ChatCrypto:
-    def __init__(self, master_key: str):
-        """
-        master_key - base64-encoded 32 bytes
-        Генерация: python -c "import secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
-        """
-        self.master_key = base64.b64decode(master_key)
-    
-    def _derive_chat_key(self, chat_id: int) -> bytes:
-        """Derive unique 32-byte key for chat from master key"""
-        key_material = sha256(
-            self.master_key + str(chat_id).encode()
-        ).digest()
-        return base64.urlsafe_b64encode(key_material)
-    
-    def encrypt(self, chat_id: int, text: str) -> str:
-        """Encrypt message for specific chat"""
-        f = Fernet(self._derive_chat_key(chat_id))
-        return f.encrypt(text.encode()).decode()
-    
-    def decrypt(self, chat_id: int, encrypted: str) -> str:
-        """Decrypt message from specific chat"""
-        f = Fernet(self._derive_chat_key(chat_id))
-        return f.decrypt(encrypted.encode()).decode()
-    
-    def get_key_hash(self, chat_id: int) -> str:
-        """Hash для идентификации ключа (для GDPR удаления)"""
-        return sha256(self._derive_chat_key(chat_id)).hexdigest()
+    async def route(self, user_query: str, chat_id: int) -> str:
+        # Получаем enabled skills для чата
+        enabled = await self.db.get_enabled_skills(chat_id)
+
+        # Формируем промпт
+        prompt = self._build_prompt(user_query, enabled)
+
+        # LLM выбирает skill
+        response = await self.llm.chat(prompt, temperature=0.1)
+
+        skill_name = response.strip().lower()
+
+        # Fallback на QA если skill не найден
+        if skill_name not in enabled:
+            return "qa"
+
+        return skill_name
+```
+
+**Router Prompt Template:**
+
+```
+You are a routing agent.
+User query: "{query}"
+
+Available skills:
+- summary: Create summaries
+- coach: Communication advice
+- qa: Answer questions
+- analytics: Statistics
+
+Return ONE skill name only.
+```
+
+### 2.4 Best Practices для Router
+
+✅ **DO:**
+- Минимальный промпт (50-100 токенов)
+- Температура 0.1 для стабильности
+- Всегда имейте fallback
+- Проверяйте enabled_skills
+
+❌ **DON'T:**
+- Не передавайте весь контекст
+- Не делайте Router сложным
+- Не забывайте валидацию
+
+---
+
+## 3. Skills System
+
+### 3.1 Что такое Skill?
+
+**Skill (Навык)** - это специализированный агент со своим:
+1. **System Prompt** - инструкция для LLM
+2. **Allowed Tools** - список доступных инструментов
+3. **Output Format** - формат ответа (text/markdown/json)
+4. **Parameters** - настройки (температура, макс токены)
+
+### 3.2 Структура Skill
+
+```python
+class MySkill:
+    name = "my_skill"
+    system_prompt = "..."
+    allowed_tools = ["tool1", "tool2"]
+    output_format = "text"
+    temperature = 0.7
+```
+
+### 3.3 Пример: QA Skill
+
+**Назначение:** Отвечает на вопросы с контекстом чата.
+
+**Allowed Tools:**
+- `get_chat_history()` - последние сообщения
+- `sql_analytics()` - статистика
+- `general_answer()` - общие знания LLM
+
+**System Prompt:**
+
+```
+You are a chat assistant.
+
+Tools available:
+1. get_chat_history(limit, days) - retrieve messages
+2. sql_analytics(query) - execute SELECT queries
+3. general_answer() - use your knowledge
+
+Instructions:
+- For chat history questions → use get_chat_history()
+- For statistics → use sql_analytics()
+- For general questions → use general_answer()
+- Cite sources (usernames, dates)
+- Be concise
+
+Current context:
+- Chat ID: {chat_id}
+- User: {username}
+- Date: {date}
+```
+
+**Пример кода:**
+
+Файл: `app/skills/qa.py`
+
+```python
+from app.skills.base import BaseSkill
+
+class QASkill(BaseSkill):
+    def __init__(self):
+        self.name = "qa"
+        self.allowed_tools = [
+            "get_chat_history",
+            "sql_analytics", 
+            "general_answer"
+        ]
+        self.output_format = "text"
+        self.temperature = 0.7
+
+    def get_system_prompt(self, context):
+        return f"""You are a helpful assistant.
+
+Chat ID: {context['chat_id']}
+User: {context['username']}
+
+Use tools to answer questions accurately."""
+
+    async def format_output(self, text):
+        # Обрезаем для Telegram
+        if len(text) > 4000:
+            return text[:3950] + "... (обрезано)"
+        return text
 ```
 
 ---
 
-## 🤖 Telegram Bot
+### 3.4 Пример: Summary Skill
 
-### Основные handler'ы (bot/handlers.py)
+**Назначение:** Создание сводок чата за период.
+
+**System Prompt:**
+
+```
+You are a summarization expert.
+
+Task: Create structured summary of chat activity.
+
+Tools:
+- get_chat_history(days) - get messages
+- sql_analytics(query) - get stats
+
+Output format (Markdown):
+
+## 📊 Период
+{start} - {end}
+
+## 🔥 Основные темы
+1. Тема 1 (N сообщений)
+   - Описание
+
+## ✅ Решения
+- Решение 1 (@user, date)
+
+## 💬 Активные участники
+1. @user1 - N msgs
+2. @user2 - M msgs
+
+## ❓ Открытые вопросы
+- Вопрос 1
+
+Rules:
+- Use Russian
+- Include dates and usernames
+- Be concise
+```
+
+Файл: `app/skills/summary.py`
+
+---
+
+### 3.5 Пример: Analytics Skill
+
+**Назначение:** SQL-запросы через natural language.
+
+**Allowed Tools:**
+- `sql_analytics()` только
+
+**System Prompt:**
+
+```
+You are a data analyst.
+
+Database schema:
+- users (id, username, full_name)
+- messages (chat_id, user_id, timestamp)
+
+Task:
+1. Translate question to SQL
+2. Call sql_analytics(query)
+3. Format results
+
+CRITICAL: Always filter by chat_id = {chat_id}
+
+Examples:
+Q: "How many messages from @user?"
+SQL: SELECT COUNT(*) FROM messages m
+     JOIN users u ON m.user_id = u.id
+     WHERE m.chat_id = {chat_id}
+     AND u.username = 'user'
+
+Q: "Top 5 active users"
+SQL: SELECT u.username, COUNT(*) as cnt
+     FROM messages m
+     JOIN users u ON m.user_id = u.id
+     WHERE m.chat_id = {chat_id}
+     GROUP BY u.id
+     ORDER BY cnt DESC
+     LIMIT 5
+```
+
+Файл: `app/skills/analytics.py`
+
+---
+
+### 3.6 Пример: Coach Skill
+
+**Назначение:** Анализ коммуникации и рекомендации.
+
+**System Prompt:**
+
+```
+You are a team communication coach.
+
+Task:
+1. Analyze chat messages
+2. Evaluate tone, constructiveness
+3. Provide 3-5 recommendations
+
+Format:
+✅ Positive observations
+⚠️ Areas to improve
+💡 Recommendations:
+1. ...
+2. ...
+
+Be constructive and friendly.
+```
+
+---
+
+## 4. Tools Layer
+
+### 4.1 Что такое Tool?
+
+**Tool** - атомарная функция для выполнения конкретной задачи:
+- Четкий input/output
+- Одна ответственность
+- Безопасность (валидация, rate limiting)
+- Тестируемость
+
+### 4.2 Tool Definition Format
+
+Используем стандарт OpenAI Function Calling:
+
+```python
+{
+    "type": "function",
+    "function": {
+        "name": "get_chat_history",
+        "description": "Retrieve recent messages",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Max messages (default 20)",
+                    "default": 20
+                },
+                "days": {
+                    "type": "integer", 
+                    "description": "Last N days (default 7)",
+                    "default": 7
+                }
+            }
+        }
+    }
+}
+```
+
+### 4.3 Tool: get_chat_history()
+
+**Назначение:** Получить последние сообщения с информацией о пользователях.
+
+**Параметры:**
+- `chat_id` (int) - ID чата
+- `limit` (int) - макс. сообщений (default: 20, max: 100)
+- `days` (int) - за последние N дней (default: 7)
+
+**Возвращает:**
+
+```json
+{
+    "messages": [
+        {
+            "timestamp": "2026-01-28 09:15",
+            "user_id": 123,
+            "username": "@vitya",
+            "full_name": "Виктор",
+            "content": "Текст сообщения"
+        }
+    ],
+    "count": 15
+}
+```
+
+**Код:**
+
+Файл: `app/core/tools.py`
+
+```python
+async def get_chat_history(
+    chat_id: int,
+    limit: int = 20,
+    days: int = 7
+) -> dict:
+    # Валидация
+    limit = min(limit, 100)
+    days = min(days, 365)
+
+    # Получаем из БД
+    since = datetime.now() - timedelta(days=days)
+    messages = await db.get_messages(chat_id, since, limit)
+
+    # Расшифровываем и добавляем user info
+    result = []
+    for msg in messages:
+        user = await db.get_user(msg.user_id)
+        result.append({
+            "timestamp": msg.timestamp.strftime("%Y-%m-%d %H:%M"),
+            "user_id": msg.user_id,
+            "username": user.username,
+            "full_name": user.full_name,
+            "content": crypto.decrypt(chat_id, msg.content_encrypted)
+        })
+
+    return {"messages": result, "count": len(result)}
+```
+
+---
+
+### 4.4 Tool: sql_analytics()
+
+**Назначение:** Безопасное выполнение SELECT запросов.
+
+**Security Checks:**
+1. Только SELECT
+2. Обязательный `WHERE chat_id = X`
+3. Нет запрещенных слов (DROP, DELETE, etc)
+4. Нет `;` или `--`
+5. Read-only connection
+
+**Параметры:**
+- `chat_id` (int)
+- `query` (str) - SQL запрос
+
+**Код:**
+
+```python
+async def sql_analytics(chat_id: int, query: str) -> dict:
+    # Security check
+    if not is_safe_query(query, chat_id):
+        return {
+            "error": "Unsafe query",
+            "details": "Must be SELECT with chat_id filter"
+        }
+
+    try:
+        async with db.read_only_connection() as conn:
+            cursor = await conn.execute(query)
+            rows = await cursor.fetchall()
+            columns = [d[0] for d in cursor.description]
+
+            data = [dict(zip(columns, row)) for row in rows]
+
+            # Audit log
+            await db.audit_log(
+                action="sql_query",
+                chat_id=chat_id,
+                details={"query": query, "rows": len(data)}
+            )
+
+            return {
+                "columns": columns,
+                "data": data,
+                "count": len(data)
+            }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def is_safe_query(query: str, chat_id: int) -> bool:
+    q = query.upper().strip()
+
+    FORBIDDEN = ["DELETE", "DROP", "UPDATE", "INSERT", 
+                 "ALTER", "CREATE", "PRAGMA"]
+
+    # 1. Только SELECT
+    if not q.startswith("SELECT"):
+        return False
+
+    # 2. Нет запрещенных слов
+    if any(kw in q for kw in FORBIDDEN):
+        return False
+
+    # 3. Обязательный chat_id filter
+    if f"chat_id = {chat_id}" not in query.replace(" ", ""):
+        return False
+
+    # 4. Нет injection паттернов
+    if ";" in query or "--" in query:
+        return False
+
+    return True
+```
+
+---
+
+### 4.5 Tool: general_answer()
+
+**Назначение:** Ответ LLM без доступа к БД.
+
+**Параметры:** нет
+
+**Возвращает:**
+
+```json
+{
+    "message": "Use general knowledge"
+}
+```
+
+Это placeholder - LLM просто использует свои знания.
+
+---
+
+## 5. Skill Agent Executor
+
+### 5.1 Класс SkillAgent
+
+**Назначение:** Выполнение Skills с поддержкой tool calling.
+
+Файл: `app/core/agent.py`
+
+```python
+class SkillAgent:
+    def __init__(self, llm_client):
+        self.llm = llm_client
+
+    async def execute(
+        self,
+        skill: BaseSkill,
+        query: str,
+        chat_id: int,
+        user_id: int
+    ) -> str:
+        # 1. Подготовка контекста
+        context = await skill.prepare_context(
+            query, chat_id, user_id
+        )
+
+        # 2. System prompt
+        system_prompt = skill.get_system_prompt(context)
+
+        # 3. Messages для LLM
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": query}
+        ]
+
+        # 4. Tool definitions
+        tools = skill.get_tool_definitions()
+
+        # 5. LLM с tool calling
+        raw_output = await self.llm.chat_with_tools(
+            messages=messages,
+            tools=tools,
+            chat_id=chat_id,
+            temperature=skill.temperature
+        )
+
+        # 6. Форматирование
+        formatted = await skill.format_output(raw_output)
+
+        # 7. Логирование
+        await self._log_usage(skill, query, chat_id, user_id)
+
+        return formatted
+```
+
+### 5.2 Tool Calling Flow
+
+```
+1. LLM получает messages + tool definitions
+   ↓
+2. LLM решает: нужно ли вызвать tool?
+   ↓
+3a. Если НЕТ → возвращает финальный ответ
+3b. Если ДА → возвращает tool_call
+   ↓
+4. Backend выполняет tool_call
+   ↓
+5. Результат добавляется в messages
+   ↓
+6. Goto step 1 (max 5 итераций)
+```
+
+---
+
+## 6. Integration с Aiogram
+
+### 6.1 Bot Handler
+
+Файл: `app/bot/handlers.py`
 
 ```python
 from aiogram import Router, F
 from aiogram.types import Message
-from aiogram.filters import Command
+from app.core.router import RouterAgent
+from app.core.agent import SkillAgent
+from app.skills import get_skill
 
 router = Router()
 
-# === 1. Сохранение сообщений ===
-@router.message(F.chat.type.in_(['group', 'supergroup']))
-async def save_message(message: Message):
-    """Сохраняет все сообщения в чате"""
-    
-    # Проверка: зарегистрирован ли чат
-    if not await db.is_chat_registered(message.chat.id):
-        await db.register_chat(
-            chat_id=message.chat.id,
-            title=message.chat.title
-        )
-    
-    # Убедиться что user есть в БД
-    if not await db.user_exists(message.from_user.id):
-        await db.create_user(
-            user_id=message.from_user.id,
-            username=message.from_user.username,
-            first_name=message.from_user.first_name
-        )
-    
-    # Добавить юзера в чат
-    await db.add_chat_member(message.chat.id, message.from_user.id)
-    
-    # Шифрование + сохранение
-    crypto = ChatCrypto(settings.encryption_master_key)
-    encrypted = crypto.encrypt(message.chat.id, message.text or "")
-    
-    await db.save_message(
-        chat_id=message.chat.id,
-        message_id=message.message_id,
-        user_id=message.from_user.id,
-        content_encrypted=encrypted,
-        timestamp=message.date
-    )
-    
-    # FTS индексация (автоматическая через триггер)
+@router.message(F.text.regexp(r"@bot"))
+async def handle_mention(message: Message):
+    # Извлекаем запрос
+    query = message.text.replace("@bot", "").strip()
 
-# === 2. Упоминание бота (@bot вопрос) ===
-@router.message(F.text.contains(f"@{bot.username}"))
-async def bot_mention(message: Message):
-    """Отвечает на вопросы через LLM с контекстом чата"""
-    
-    question = message.text.replace(f"@{bot.username}", "").strip()
-    if not question:
-        return
-    
-    # Получить контекст (последние 20 сообщений)
-    context_messages = await db.get_recent_messages(
+    # 1. Router выбирает skill
+    router_agent = RouterAgent(llm, db)
+    skill_name = await router_agent.route(
+        query, message.chat.id
+    )
+
+    # 2. Загружаем skill
+    skill = get_skill(skill_name)
+
+    # 3. Выполняем
+    agent = SkillAgent(llm)
+    response = await agent.execute(
+        skill, query,
         message.chat.id,
-        limit=settings.context_messages
+        message.from_user.id
     )
-    
-    # Расшифровка контекста
-    crypto = ChatCrypto(settings.encryption_master_key)
-    context = [
-        {
-            "user": msg['username'],
-            "text": crypto.decrypt(message.chat.id, msg['content_encrypted']),
-            "time": msg['timestamp']
-        }
-        for msg in context_messages
-    ]
-    
-    # Получить язык и настройки чата
-    settings_row = await db.get_chat_settings(message.chat.id)
-    lang = settings_row['language'] if settings_row else 'ru'
-    
-    # LLM запрос
-    answer = await llm.chat_qa(question, context, lang)
-    
-    # Логирование usage
-    await db.log_llm_usage(
-        user_id=message.from_user.id,
-        chat_id=message.chat.id,
-        skill='qa',
-        tokens_prompt=answer['usage']['prompt_tokens'],
-        tokens_completion=answer['usage']['completion_tokens']
-    )
-    
-    await message.reply(answer['text'][:4096])  # Лимит Telegram
 
-# === 3. Личное общение с ботом ===
-@router.message(F.chat.type == 'private')
-async def private_chat(message: Message, state: FSMContext):
-    """Личный чат с ботом - выбор чата + SQL-агент"""
-    
-    # Получить все чаты пользователя
-    user_chats = await db.get_user_chats(message.from_user.id)
-    
-    if not user_chats:
-        await message.reply("You are not a member of any registered chats.")
-        return
-    
-    # Если пользователь еще не выбрал чат - показать список
-    state_data = await state.get_data()
-    if 'selected_chat_id' not in state_data:
-        # Показать inline keyboard с чатами
-        await show_chat_selector(message, user_chats, state)
-        return
-    
-    # SQL-агент для выбранного чата
-    chat_id = state_data['selected_chat_id']
-    lang = await db.get_user_language(message.from_user.id)
-    
-    # Валидация доступа
-    if not await db.is_chat_member(message.from_user.id, chat_id):
-        await message.reply("Access denied to this chat.")
-        return
-    
-    # Выполнить SQL-агент запрос
-    answer = await sql_agent.query(
-        user_id=message.from_user.id,
-        chat_id=chat_id,
-        question=message.text,
-        lang=lang
-    )
-    
-    await message.reply(answer[:4096])
+    # 4. Отправляем
+    parse_mode = "Markdown" if skill.output_format == "markdown" else None
+    await message.reply(response, parse_mode=parse_mode)
+```
 
-# === 4. Thread summary ===
-@router.message(Command("summarize_thread"))
-async def summarize_thread(message: Message):
-    """Суммаризация треда или последних N сообщений"""
-    
-    # Определить границы треда
-    if message.reply_to_message:
-        # Get all messages in reply chain
-        thread_messages = await db.get_reply_chain(
-            message.chat.id,
-            message.reply_to_message.message_id
+### 6.2 Scheduled Summary
+
+```python
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+scheduler = AsyncIOScheduler()
+
+@scheduler.scheduled_job('cron', hour=16, minute=0)
+async def daily_summary():
+    # Получаем все чаты с enabled summary
+    chats = await db.get_chats_with_summary_enabled()
+
+    for chat in chats:
+        # Выполняем summary skill
+        skill = get_skill("summary")
+        agent = SkillAgent(llm)
+
+        summary = await agent.execute(
+            skill,
+            query="Создай сводку за день",
+            chat_id=chat.id,
+            user_id=None  # System
         )
-    else:
-        # Last 50 messages
-        thread_messages = await db.get_recent_messages(
-            message.chat.id,
-            limit=50
-        )
-    
-    # Расшифровка
-    crypto = ChatCrypto(settings.encryption_master_key)
-    decrypted_messages = [
-        {
-            "user": msg['username'],
-            "text": crypto.decrypt(message.chat.id, msg['content_encrypted'])
-        }
-        for msg in thread_messages
-    ]
-    
-    # Skill: thread_summary
-    from skills.thread_summary import ThreadSummarySkill
-    skill = ThreadSummarySkill(llm_client)
-    
-    lang = await db.get_chat_language(message.chat.id)
-    result = await skill.execute(decrypted_messages, language=lang)
-    
-    await message.reply(result.text[:4096])
-    
-    # Log usage
-    await db.log_llm_usage(
-        user_id=message.from_user.id,
-        chat_id=message.chat.id,
-        skill='thread_summary',
-        tokens_prompt=result.tokens_used // 2,
-        tokens_completion=result.tokens_used // 2
-    )
 
-# === 5. Удаление сообщения ===
-@router.deleted_message()
-async def handle_deleted_message(message: Message):
-    """Отслеживание удаленных сообщений"""
-    await db.mark_message_deleted(
-        chat_id=message.chat.id,
-        message_id=message.message_id
-    )
-```
-
-### Команды бота (bot/commands.py)
-
-```python
-from aiogram import Router
-from aiogram.filters import Command
-from aiogram.types import Message
-
-router = Router()
-
-@router.message(Command("start"))
-async def cmd_start(message: Message):
-    """Приветствие в личном чате"""
-    text = """
-👋 Welcome to Chat Analytics Bot!
-
-Commands:
-/stats - Chat statistics
-/export - Export chat history
-/help - Show all commands
-/summarize_thread - Summarize discussion
-    """
-    await message.answer(text)
-
-@router.message(Command("stats"))
-async def cmd_stats(message: Message):
-    """Статистика чата"""
-    if message.chat.type == 'private':
-        await message.reply("Use this command in a group chat")
-        return
-    
-    stats = await db.get_chat_stats(message.chat.id)
-    text = f"""
-📊 Chat Statistics:
-- Total messages: {stats['message_count']}
-- Active members: {stats['member_count']}
-- Messages today: {stats['messages_today']}
-- Last activity: {stats['last_activity']}
-    """
-    await message.reply(text)
-
-@router.message(Command("export"))
-async def cmd_export(message: Message):
-    """Экспорт истории чата в TXT"""
-    if message.chat.type == 'private':
-        await message.reply("Use this command in a group chat")
-        return
-    
-    # Проверка прав (только админ чата или юзер может экспортировать свой чат)
-    if not await db.is_chat_admin(message.from_user.id, message.chat.id):
-        # Но юзеры в личном чате могут запросить экспорт
-        await message.reply("Only chat admins can export. Request export in bot PM.")
-        return
-    
-    # Генерация TXT файла
-    file_path = await export_chat_history(
-        chat_id=message.chat.id,
-        crypto=ChatCrypto(settings.encryption_master_key)
-    )
-    
-    with open(file_path, 'rb') as f:
-        await message.reply_document(f)
-    
-    # Audit log
-    await db.audit_log(
-        user_id=message.from_user.id,
-        action="export_chat",
-        chat_id=message.chat.id
-    )
-
-@router.message(Command("help"))
-async def cmd_help(message: Message):
-    """Список команд"""
-    text = """
-Commands:
-/start - Show welcome message
-/stats - Chat statistics
-/export - Export chat as TXT
-/summarize_thread - Summarize discussion or thread
-/help - Show this message
-
-Features:
-- @bot question - Ask question about chat
-- In personal chat - SQL agent mode to query chat data
-    """
-    await message.reply(text)
-```
-
----
-
-## 🌐 Web API
-
-### Авторизация (web/routes/auth.py)
-
-```python
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-
-router = APIRouter()
-
-class TelegramAuthData(BaseModel):
-    id: int
-    first_name: str
-    username: str | None = None
-    auth_date: int
-    hash: str
-
-@router.post("/auth/telegram")
-async def telegram_login(data: TelegramAuthData):
-    """
-    Telegram Login Widget authentication
-    Клиент отправляет данные с фронтенда после Telegram Login Widget
-    """
-    
-    # Verify hash (Telegram OAuth signature)
-    if not verify_telegram_auth(data, settings.telegram_bot_token):
-        raise HTTPException(401, "Invalid auth hash")
-    
-    # Create or update user
-    await db.get_or_create_user(
-        user_id=data.id,
-        username=data.username,
-        first_name=data.first_name
-    )
-    
-    # Generate JWT
-    token = create_jwt_token(user_id=data.id)
-    
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "user_id": data.id,
-        "username": data.username
-    }
-
-@router.post("/auth/superadmin")
-async def superadmin_login(password: str):
-    """Superadmin login with password"""
-    if not verify_password(password, settings.superadmin_password_hash):
-        raise HTTPException(401, "Invalid password")
-    
-    token = create_jwt_token(user_id=0, is_superadmin=True)
-    return {
-        "access_token": token,
-        "token_type": "bearer"
-    }
-```
-
-### SQL-агент чат (web/routes/chat.py)
-
-```python
-from fastapi import APIRouter, Depends
-from pydantic import BaseModel
-
-router = APIRouter()
-
-class ChatQueryRequest(BaseModel):
-    chat_id: int
-    question: str
-
-@router.post("/chat/query")
-async def sql_agent_query(
-    req: ChatQueryRequest,
-    user: dict = Depends(get_current_user)
-):
-    """SQL-агент для разговора с данными чата"""
-    
-    # Проверка доступа
-    if not await db.is_chat_member(user['id'], req.chat_id):
-        raise HTTPException(403, "Access denied")
-    
-    # SQL-агент
-    answer = await sql_agent.query(
-        user_id=user['id'],
-        chat_id=req.chat_id,
-        question=req.question,
-        lang=user.get('language', 'ru')
-    )
-    
-    return {"answer": answer}
-
-@router.get("/chat/{chat_id}/history")
-async def get_chat_history(
-    chat_id: int,
-    limit: int = 100,
-    offset: int = 0,
-    search: str | None = None,
-    user: dict = Depends(get_current_user)
-):
-    """Получить историю чата с полнотекстовым поиском"""
-    
-    if not await db.is_chat_member(user['id'], chat_id):
-        raise HTTPException(403)
-    
-    # FTS поиск
-    if search:
-        messages = await db.fts_search(chat_id, search, limit, offset)
-    else:
-        messages = await db.get_messages(chat_id, limit, offset)
-    
-    # Расшифровка
-    crypto = ChatCrypto(settings.encryption_master_key)
-    decrypted = [
-        {
-            "id": msg['id'],
-            "user_id": msg['user_id'],
-            "username": msg['username'],
-            "content": crypto.decrypt(chat_id, msg['content_encrypted']),
-            "timestamp": msg['timestamp']
-        }
-        for msg in messages
-    ]
-    
-    return {
-        "messages": decrypted,
-        "total": await db.count_messages(chat_id)
-    }
-```
-
-### Настройки чата (web/routes/settings.py)
-
-```python
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
-
-router = APIRouter()
-
-class ChatSettingsUpdate(BaseModel):
-    summary_enabled: bool | None = None
-    summary_time_local: str | None = None
-    summary_custom_prompt: str | None = None
-    summary_target: str | None = None  # 'chat', 'bot', 'disabled'
-    
-    coach_enabled: bool | None = None
-    coach_custom_prompt: str | None = None
-    coach_target: str | None = None
-    
-    language: str | None = None
-
-@router.get("/settings/{chat_id}")
-async def get_chat_settings(
-    chat_id: int,
-    user: dict = Depends(get_current_user)
-):
-    """Получить настройки чата"""
-    
-    if not await db.is_chat_admin(user['id'], chat_id):
-        raise HTTPException(403, "Only admins can view settings")
-    
-    settings = await db.get_chat_settings(chat_id)
-    return settings or {}
-
-@router.put("/settings/{chat_id}")
-async def update_chat_settings(
-    chat_id: int,
-    updates: ChatSettingsUpdate,
-    user: dict = Depends(get_current_user)
-):
-    """Обновить настройки чата"""
-    
-    if not await db.is_chat_admin(user['id'], chat_id):
-        raise HTTPException(403)
-    
-    update_data = updates.dict(exclude_none=True)
-    await db.update_chat_settings(chat_id, update_data)
-    
-    # Audit log
-    await db.audit_log(
-        user_id=user['id'],
-        action="update_settings",
-        chat_id=chat_id,
-        details=update_data
-    )
-    
-    return {"status": "ok"}
-```
-
-### Суперадмин панель (web/routes/admin.py)
-
-```python
-from fastapi import APIRouter, Depends, HTTPException
-
-router = APIRouter()
-
-@router.get("/admin/stats")
-async def get_global_stats(user: dict = Depends(require_superadmin)):
-    """Глобальная статистика БЕЗ доступа к контенту чатов"""
-    
-    stats = {
-        "total_users": await db.count_users(),
-        "total_chats": await db.count_chats(),
-        "total_messages": await db.count_messages(),
-        
-        "tokens_by_skill": await db.get_tokens_by_skill(),
-        
-        "per_user_stats": await db.get_per_user_stats()
-    }
-    
-    return stats
-
-@router.post("/admin/notify")
-async def notify_user(
-    user_id: int,
-    message: str,
-    user: dict = Depends(require_superadmin)
-):
-    """Отправить уведомление пользователю в Telegram"""
-    
-    try:
-        await bot.send_message(user_id, f"⚠️ Admin notification:\n{message}")
-    except Exception as e:
-        raise HTTPException(500, f"Failed to send: {str(e)}")
-    
-    await db.audit_log(
-        user_id=0,  # System action
-        action="admin_notify",
-        chat_id=None,
-        details={"target_user_id": user_id, "message": message}
-    )
-    
-    return {"status": "sent"}
-```
-
----
-
-## 🎓 Skills (расширяемые модули)
-
-### Базовый класс (skills/base.py)
-
-```python
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Any
-
-@dataclass
-class SkillResult:
-    text: str
-    tokens_used: int
-    metadata: dict[str, Any] | None = None
-
-class Skill(ABC):
-    """Base class for all bot skills"""
-    
-    @property
-    @abstractmethod
-    def name(self) -> str:
-        """Skill name for logging"""
-        pass
-    
-    @abstractmethod
-    async def execute(self, context: Any, language: str = "ru") -> SkillResult:
-        """Execute skill with given context"""
-        pass
-```
-
-### Summary Skill (skills/summary.py)
-
-```python
-from .base import Skill, SkillResult
-from core.llm import LLMClient
-
-class SummarySkill(Skill):
-    @property
-    def name(self) -> str:
-        return "summary"
-    
-    def __init__(self, llm_client: LLMClient):
-        self.llm = llm_client
-    
-    async def execute(
-        self,
-        messages: list,
-        language: str = "ru",
-        custom_prompt: str = ""
-    ) -> SkillResult:
-        """Generate daily summary of chat"""
-        
-        # Формирование промпта
-        base_prompt = get_summary_prompt(language)
-        if custom_prompt:
-            base_prompt += f"\n\nAdditional instructions:\n{custom_prompt}"
-        
-        # Подготовка контекста
-        context_text = "\n".join([
-            f"[{msg['timestamp']}] {msg['username']}: {msg['text']}"
-            for msg in messages
-        ])
-        
-        # LLM генерация
-        response = await self.llm.generate(
-            prompt=f"{base_prompt}\n\nChat history:\n{context_text}",
-            max_tokens=1000
-        )
-        
-        return SkillResult(
-            text=response['text'],
-            tokens_used=response['usage']['total_tokens'],
-            metadata={"messages_count": len(messages)}
-        )
-```
-
-### Thread Summary Skill (skills/thread_summary.py)
-
-```python
-from .base import Skill, SkillResult
-
-class ThreadSummarySkill(Skill):
-    @property
-    def name(self) -> str:
-        return "thread_summary"
-    
-    def __init__(self, llm_client):
-        self.llm = llm_client
-    
-    async def execute(
-        self,
-        messages: list,
-        language: str = "ru"
-    ) -> SkillResult:
-        """Summarize thread/discussion in 3-5 points"""
-        
-        prompt = get_thread_summary_prompt(language)
-        
-        context = "\n".join([
-            f"{msg['username']}: {msg['text']}"
-            for msg in messages
-        ])
-        
-        response = await self.llm.generate(
-            prompt=f"{prompt}\n\nDiscussion:\n{context}",
-            max_tokens=500
-        )
-        
-        return SkillResult(
-            text=response['text'],
-            tokens_used=response['usage']['total_tokens']
+        # Отправляем в чат
+        await bot.send_message(
+            chat_id=chat.id,
+            text=summary,
+            parse_mode="Markdown"
         )
 ```
 
 ---
 
-## 🔒 SQL-агент (core/sql_agent.py)
+## 7. Best Practices
+
+### 7.1 Для Skills
+
+✅ **DO:**
+- Специализация (один навык = одна задача)
+- Четкие system prompts с примерами
+- Явный output format
+- Валидация параметров
+- Логирование LLM usage
+
+❌ **DON'T:**
+- Универсальные skills
+- Смешение задач
+- Превышение Telegram лимитов
+- Избыточный контекст
+
+### 7.2 Для Tools
+
+✅ **DO:**
+- Атомарность (одна функция = одна задача)
+- Type hints
+- Error handling
+- Input validation
+- Audit logging
+- Rate limiting
+
+❌ **DON'T:**
+- "Swiss army knife" tools
+- Игнорирование security
+- Забывать про permissions
+
+### 7.3 Security Checklist
+
+Перед production:
+
+- [ ] Валидация всех inputs
+- [ ] Rate limiting настроен
+- [ ] SQL injection защита
+- [ ] Audit logging
+- [ ] Unit tests написаны
+- [ ] Integration tests
+- [ ] Code review
+
+---
+
+## 8. Testing
+
+### 8.1 Unit Tests для Skills
 
 ```python
-import re
-from typing import Optional
+# tests/test_skills.py
+import pytest
+from app.skills.qa import QASkill
 
-class SafeSQLAgent:
-    FORBIDDEN = ["DELETE", "DROP", "UPDATE", "INSERT", "ALTER", "CREATE", "EXEC", "PRAGMA"]
-    
-    def __init__(self, llm_client, schema: str):
-        self.llm = llm_client
-        self.schema = schema
-    
-    async def query(
-        self,
-        user_id: int,
-        chat_id: int,
-        question: str,
-        lang: str = "ru"
-    ) -> str:
-        """Safe SQL generation and execution with audit"""
-        
-        # 1. Check access
-        if not await db.is_chat_member(user_id, chat_id):
-            return get_i18n("access_denied", lang)
-        
-        # 2. Generate SQL
-        prompt = self._build_prompt(chat_id, question, lang)
-        response = await self.llm.generate(prompt, max_tokens=500)
-        sql = self._extract_sql(response['text'])
-        
-        # 3. Validate safety
-        if not self._is_safe(sql, chat_id):
-            await db.audit_log(user_id, "sql_query_blocked", chat_id, {"sql": sql})
-            return get_i18n("unsafe_query", lang)
-        
-        # 4. Execute
-        try:
-            results = await db.execute_read_only(sql)
-        except Exception as e:
-            await db.audit_log(user_id, "sql_query_error", chat_id, {
-                "sql": sql,
-                "error": str(e)
-            })
-            return get_i18n("query_error", lang)
-        
-        # 5. Format results with LLM
-        answer = await self.llm.format_results(question, results, lang)
-        
-        # 6. Log success
-        await db.log_llm_usage(
-            user_id=user_id,
-            chat_id=chat_id,
-            skill='sql_agent',
-            tokens_prompt=response['usage']['prompt_tokens'],
-            tokens_completion=response['usage']['completion_tokens']
-        )
-        
-        await db.audit_log(user_id, "sql_query", chat_id, {
-            "sql": sql,
-            "rows_returned": len(results)
-        })
-        
-        return answer['text']
-    
-    def _is_safe(self, sql: str, chat_id: int) -> bool:
-        """Validate SQL safety"""
-        sql_upper = sql.upper()
-        
-        # No forbidden keywords
-        if any(kw in sql_upper for kw in self.FORBIDDEN):
-            return False
-        
-        # Must filter by chat_id
-        chat_id_pattern = f"chat_id = {chat_id}"
-        if chat_id_pattern not in sql and chat_id_pattern.replace(" ", "") not in sql:
-            return False
-        
-        # Only SELECT allowed
-        if not sql_upper.strip().startswith("SELECT"):
-            return False
-        
-        return True
-    
-    def _build_prompt(self, chat_id: int, question: str, lang: str) -> str:
-        """Build LLM prompt"""
-        return f"""You are a SQL expert. Generate READ-ONLY SQL query ONLY.
+@pytest.mark.asyncio
+async def test_qa_skill_output_truncation():
+    skill = QASkill()
 
-Database schema:
-{self.schema}
+    long_text = "A" * 5000
+    formatted = await skill.format_output(long_text)
 
-CRITICAL RULES:
-1. ONLY SELECT queries allowed
-2. MUST include: WHERE chat_id = {chat_id}
-3. NEVER use DELETE, UPDATE, INSERT, DROP, ALTER, CREATE
+    assert len(formatted) <= 4000
+    assert "обрезано" in formatted
+```
 
-User question: {question}
-Language: {lang}
+### 8.2 Integration Tests
 
-Return ONLY SQL query, no explanation:"""
+```python
+# tests/test_integration.py
+import pytest
+from app.core.router import RouterAgent
+from app.core.agent import SkillAgent
 
-    def _extract_sql(self, text: str) -> str:
-        """Extract SQL from markdown"""
-        text = re.sub(r'```sql\n?', '', text)
-        text = re.sub(r'```\n?', '', text)
-        return text.strip()
+@pytest.mark.asyncio
+async def test_full_qa_flow():
+    # Router выбирает skill
+    router = RouterAgent(llm, db)
+    skill_name = await router.route(
+        "Сколько сообщений у Вити?",
+        chat_id=123
+    )
+
+    assert skill_name == "analytics"
+
+    # Skill выполняется
+    skill = get_skill(skill_name)
+    agent = SkillAgent(llm)
+
+    result = await agent.execute(
+        skill, "Сколько сообщений у Вити?",
+        chat_id=123, user_id=456
+    )
+
+    assert result is not None
+    assert len(result) > 0
 ```
 
 ---
 
-## 🔄 Task Queue (вместо Celery)
+## 9. Monitoring & Debugging
 
-**Очередь задач как таблица в SQLite.** Простой background worker:
+### 9.1 Логирование
 
 ```python
-# core/task_queue.py
-import asyncio
-import json
-from datetime import datetime
+import logging
 
-class TaskQueueWorker:
-    def __init__(self, db, llm_client, bot):
-        self.db = db
-        self.llm = llm_client
-        self.bot = bot
-    
-    async def start(self):
-        """Start background worker"""
-        asyncio.create_task(self._process_forever())
-    
-    async def _process_forever(self):
-        """Process pending tasks"""
-        while True:
-            # Get next pending task
-            task = await self.db.get_next_pending_task()
-            
-            if not task:
-                await asyncio.sleep(5)  # Wait before retry
-                continue
-            
-            try:
-                # Mark as processing
-                await self.db.update_task_status(task['id'], 'processing')
-                
-                # Execute
-                if task['task_type'] == 'send_summary':
-                    await self._send_summary(task)
-                elif task['task_type'] == 'send_coach':
-                    await self._send_coach(task)
-                elif task['task_type'] == 'export_chat':
-                    await self._export_chat(task)
-                
-                # Mark complete
-                await self.db.update_task_status(task['id'], 'completed')
-            
-            except Exception as e:
-                # Increment retry
-                retry_count = task['retry_count'] + 1
-                if retry_count >= task['max_retries']:
-                    await self.db.update_task_status(task['id'], 'failed', str(e))
-                else:
-                    await self.db.update_task_retry(task['id'], retry_count)
-    
-    async def enqueue_summary(self, chat_id: int, user_id: int = None):
-        """Add summary task to queue"""
-        await self.db.add_task(
-            task_type='send_summary',
-            chat_id=chat_id,
-            user_id=user_id,
-            payload={"chat_id": chat_id}
-        )
+logger = logging.getLogger(__name__)
+
+# В Router
+logger.info(f"Routing query to skill: {skill_name}")
+
+# В SkillAgent
+logger.debug(f"Executing {skill.name} with {len(tools)} tools")
+
+# В Tools
+logger.info(f"SQL query executed: {query[:100]}")
+```
+
+### 9.2 Metrics
+
+Отслеживаем:
+- Частота использования Skills
+- Средние токены на запрос
+- Время выполнения
+- Error rate
+
+```python
+# В llm_usage таблице
+await db.log_llm_usage(
+    user_id=user_id,
+    chat_id=chat_id,
+    skill=skill_name,
+    model=model_name,
+    tokens_prompt=tokens_in,
+    tokens_completion=tokens_out,
+    cost_usd=cost
+)
 ```
 
 ---
 
-## 📋 Приоритезация (MVP roadmap)
+## 10. Troubleshooting
 
-### Phase 1: Core Infrastructure (Priority 1)
-- [ ] `config.py` - Pydantic settings
-- [ ] `core/db.py` - SQLite + FTS + task queue table
-- [ ] `core/crypto.py` - AES-256 per-chat
-- [ ] `core/llm.py` - OpenAI-compatible client
-- [ ] `main.py` - FastAPI + Bot startup
-- [ ] Database migrations
+### Частые проблемы
 
-### Phase 2: Telegram Bot (Priority 1)
-- [ ] `bot/handlers.py` - Message save, mention, private chat, delete tracking
-- [ ] `bot/commands.py` - /stats, /export, /summarize_thread, /help
-- [ ] `bot/scheduler.py` - APScheduler summary/coach/cleanup
-- [ ] `core/rate_limiter.py` - asyncio.Queue with priorities
+**1. Router выбирает неправильный Skill**
+- Решение: Улучшить Router prompt
+- Добавить примеры в промпт
+- Снизить температуру до 0.0
 
-### Phase 3: Web API (Priority 1)
-- [ ] `web/main.py` - FastAPI app + health check
-- [ ] `web/middleware.py` - Auth, CORS, rate limiting
-- [ ] `web/routes/auth.py` - Telegram OAuth + JWT
-- [ ] `web/routes/chat.py` - SQL-agent + history search
-- [ ] `web/routes/settings.py` - Chat settings modal
-- [ ] `web/routes/admin.py` - Superadmin stats
+**2. Tool не вызывается**
+- Проверить tool definition format
+- Убедиться, что tool в allowed_tools
+- Проверить LLM модель (поддержка tool calling)
 
-### Phase 4: Skills (Priority 2)
-- [ ] `skills/base.py` - Abstract Skill class
-- [ ] `skills/summary.py` - Daily summary
-- [ ] `skills/coach.py` - Communication coach
-- [ ] `skills/thread_summary.py` - Thread summarization
+**3. Превышен Telegram лимит (4000 символов)**
+- Добавить truncation в format_output()
+- Разбить на несколько сообщений
 
-### Phase 5: Security & Audit (Priority 1)
-- [ ] `core/sql_agent.py` - Safe SQL validation
-- [ ] Audit log implementation
-- [ ] Input validation (Pydantic models)
-- [ ] Rate limiting tests
-
-### Phase 6: Polish & Deploy (Priority 2)
-- [ ] `core/i18n.py` - Russian + English
-- [ ] Error handling & logging
-- [ ] Docker + docker-compose
-- [ ] Tests
+**4. SQL injection блокирует запрос**
+- Проверить is_safe_query()
+- Убедиться в наличии WHERE chat_id
 
 ---
 
-## ✅ Definition of Done
+## 11. Roadmap
 
-Каждый компонент должен иметь:
-- ✅ Полная реализация (нет TODO, нет placeholders)
-- ✅ Type hints (все функции)
-- ✅ Docstrings (публичные функции)
-- ✅ Error handling (try/except с логированием)
-- ✅ Async/await везде (нет блокировок)
-- ✅ Tests (базовые unit tests)
-- ✅ Audit log (если действие требует)
+### v2.1
+- Multi-turn conversations
+- Streaming responses
+- Cost optimization (caching)
 
----
+### v2.2
+- Custom skills per chat
+- Skill marketplace
+- A/B testing промптов
 
-## 🚀 Быстрый старт для агента
-
-1. **Начни с Phase 1** - config, db, crypto
-2. **Потом Phase 2** - bot handlers и scheduler
-3. **Параллельно Phase 3** - web API endpoints
-4. **Phase 4** - добавь skills
-5. **Phase 5** - security + audit
-6. **Phase 6** - polish + deploy
-
-**Каждый файл должен быть полностью функциональным и готовым к использованию!**
+### v3.0
+- Multi-modal skills (images)
+- Voice skills (Whisper)
+- Autonomous agents
 
 ---
 
-**Версия:** 2.0 | **Статус:** Ready for Development | **Дата:** 2026-01-25
+## 12. Заключение
+
+Следуйте этой архитектуре для:
+
+✅ **Модульности** - легко добавлять Skills  
+✅ **Безопасности** - контроль через Tools  
+✅ **Тестируемости** - изолированные тесты  
+✅ **Масштабируемости** - независимая оптимизация  
+✅ **Поддерживаемости** - четкая структура  
+
+---
+
+**Версия:** 2.0 | **Дата:** 2026-01-28

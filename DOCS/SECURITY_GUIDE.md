@@ -1,22 +1,22 @@
 # SECURITY_GUIDE.md
 
-**Версия:** 1.0  
-**Дата:** 2026-01-25  
-**Проект:** Telegram Chat Analytics & Coaching Bot v2.0
+**Версия:** 2.0  
+**Дата:** 2026-01-28  
+**Статус:** Production-Ready
 
 ---
 
 ## 1. Обзор безопасности
 
-Этот проект разработан для корпоративного self-hosted использования с приватными данными чатов. Основные принципы безопасности:
+Telegram Chat Analytics Bot обрабатывает чувствительные данные, поэтому безопасность критична.
 
-- **Encryption at rest:** AES-256 per-chat шифрование всех сообщений
-- **Access control:** RBAC - пользователь видит только свои чаты
-- **Authentication:** Telegram OAuth + JWT для веб-интерфейса
-- **SQL injection prevention:** Валидация и whitelist в SQL-агенте
-- **Audit logging:** Все чувствительные операции логируются
-- **Rate limiting:** Защита от abuse на уровне API и Telegram
-- **No third-party data storage:** Все данные остаются на вашем сервере
+### Основные принципы
+
+🔐 **Defense in Depth** - многоуровневая защита  
+🔑 **Principle of Least Privilege** - минимальные права  
+📊 **Audit Everything** - логирование всех действий  
+🛡️ **Encryption at Rest** - шифрование данных  
+🚨 **Fail Secure** - безопасный отказ при ошибках  
 
 ---
 
@@ -24,622 +24,647 @@
 
 ### 2.1 Per-Chat Encryption
 
-Каждый чат имеет уникальный ключ шифрования, производный от master key:
+Каждый чат шифруется уникальным ключом, производным от мастер-ключа.
 
-```python
-# Генерация master key (делается ОДИН раз при развертывании)
-import secrets
-import base64
-
-master_key = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()
-print(f"ENCRYPTION_MASTER_KEY={master_key}")
-```
-
-**Сохраните этот ключ в `.env` и НИКОГДА не коммитьте в git!**
-
-### 2.2 Алгоритм шифрования
-
-- **Алгоритм:** Fernet (AES-128-CBC + HMAC-SHA256)
-- **Библиотека:** `cryptography.fernet`
-- **Ключ на чат:** `SHA256(master_key + chat_id)` → Base64
-
-Пример:
 ```python
 from cryptography.fernet import Fernet
-from hashlib import sha256
+import hashlib
 import base64
 
-def derive_chat_key(master_key: bytes, chat_id: int) -> bytes:
-    key_material = sha256(master_key + str(chat_id).encode()).digest()
-    return base64.urlsafe_b64encode(key_material)
+class ChatCrypto:
+    def __init__(self, master_key: str):
+        if not master_key:
+            raise ValueError("MASTER_ENCRYPTION_KEY not set")
 
-# Шифрование
-chat_key = derive_chat_key(master_key, -1001234567890)
-f = Fernet(chat_key)
-encrypted = f.encrypt(b"Hello world")
+        self.master_key = base64.urlsafe_b64decode(master_key)
 
-# Расшифровка
-decrypted = f.decrypt(encrypted)
+        if len(self.master_key) != 32:
+            raise ValueError("Master key must be 32 bytes")
+
+    def derive_chat_key(self, chat_id: int) -> bytes:
+        data = self.master_key + str(chat_id).encode('utf-8')
+        key_material = hashlib.sha256(data).digest()
+        return base64.urlsafe_b64encode(key_material)
+
+    def encrypt(self, chat_id: int, plaintext: str) -> str:
+        if not plaintext:
+            raise ValueError("Cannot encrypt empty string")
+
+        key = self.derive_chat_key(chat_id)
+        f = Fernet(key)
+        ciphertext = f.encrypt(plaintext.encode('utf-8'))
+        return ciphertext.decode('ascii')
+
+    def decrypt(self, chat_id: int, ciphertext: str) -> str:
+        if not ciphertext:
+            raise ValueError("Cannot decrypt empty string")
+
+        try:
+            key = self.derive_chat_key(chat_id)
+            f = Fernet(key)
+            plaintext = f.decrypt(ciphertext.encode('ascii'))
+            return plaintext.decode('utf-8')
+        except Exception as e:
+            logger.error(f"Decryption failed for chat {chat_id}")
+            raise
 ```
 
-### 2.3 Что НЕ шифруется
+### 2.2 Генерация мастер-ключа
 
-- Метаданные: `user_id`, `chat_id`, `timestamp`, `message_id`
-- Статистика: количество сообщений, членов чата
-- Настройки чатов
+```bash
+# Генерация нового ключа (выполнить ОДИН РАЗ)
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 
-Это необходимо для работы индексов и SQL-агента без расшифровки всей БД.
+# Результат (пример):
+# hN6p3RlK4Qm9Xw2Yv8Zt5Bf7Cg1Dj0Ek6Lh3Mn4Op2Qr==
 
-### 2.4 Ротация ключей (GDPR/удаление данных)
-
-Для полного удаления данных чата:
-
-```sql
--- 1. Удалить сообщения
-DELETE FROM messages WHERE chat_id = ?;
-DELETE FROM messages_fts WHERE chat_id = ?;
-
--- 2. Удалить связи
-DELETE FROM chat_members WHERE chat_id = ?;
-DELETE FROM chat_settings WHERE chat_id = ?;
-
--- 3. Soft delete чата
-UPDATE chats SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?;
-
--- 4. Аудит
-INSERT INTO audit_log (user_id, action, chat_id, details)
-VALUES (NULL, 'gdpr_delete', ?, '{"reason": "user_request"}');
+# Добавить в .env:
+MASTER_ENCRYPTION_KEY=hN6p3RlK4Qm9Xw2Yv8Zt5Bf7Cg1Dj0Ek6Lh3Mn4Op2Qr==
 ```
 
-После этого ключ шифрования для чата становится бесполезным.
+**⚠️ КРИТИЧНО:**
+- Генерируйте ключ ОДИН РАЗ
+- Храните в `.env` (добавьте в `.gitignore`)
+- Backup в защищенном месте (1Password, Vault)
+- При утере ключа данные НЕВОССТАНОВИМЫ
 
 ---
 
-## 3. Аутентификация и авторизация
+## 3. Аутентификация
 
-### 3.1 Telegram OAuth
-
-Используется Telegram Login Widget для веб-интерфейса.
-
-**Проверка подписи:**
+### 3.1 Telegram 2FA (OTP)
 
 ```python
+import secrets
 import hashlib
-import hmac
+from datetime import datetime, timedelta
 
-def verify_telegram_auth(data: dict, bot_token: str) -> bool:
-    # Verify Telegram OAuth signature
-    check_hash = data.pop('hash')
+class OTPManager:
+    def __init__(self, redis_client):
+        self.redis = redis_client
+        self.OTP_LENGTH = 6
+        self.OTP_TTL = 300  # 5 минут
+        self.MAX_ATTEMPTS = 3
 
-    data_check_string = '\n'.join([
-        f"{k}={v}" for k, v in sorted(data.items())
-    ])
+    def generate_otp(self, telegram_id: int) -> str:
+        otp = ''.join(secrets.choice('0123456789') for _ in range(self.OTP_LENGTH))
 
-    secret_key = hashlib.sha256(bot_token.encode()).digest()
-    calculated_hash = hmac.new(
-        secret_key,
-        data_check_string.encode(),
-        hashlib.sha256
-    ).hexdigest()
+        # Хешируем перед сохранением
+        otp_hash = hashlib.sha256(otp.encode()).hexdigest()
 
-    return calculated_hash == check_hash
+        key = f"otp:{telegram_id}"
+        self.redis.setex(key, self.OTP_TTL, otp_hash)
+
+        attempts_key = f"otp_attempts:{telegram_id}"
+        self.redis.setex(attempts_key, self.OTP_TTL, 0)
+
+        return otp
+
+    async def verify_otp(self, telegram_id: int, otp: str) -> bool:
+        key = f"otp:{telegram_id}"
+        attempts_key = f"otp_attempts:{telegram_id}"
+
+        attempts = int(self.redis.get(attempts_key) or 0)
+        if attempts >= self.MAX_ATTEMPTS:
+            return False
+
+        self.redis.incr(attempts_key)
+
+        stored_hash = self.redis.get(key)
+        if not stored_hash:
+            return False
+
+        otp_hash = hashlib.sha256(otp.encode()).hexdigest()
+
+        if secrets.compare_digest(stored_hash.decode(), otp_hash):
+            self.redis.delete(key)
+            self.redis.delete(attempts_key)
+            return True
+
+        return False
 ```
-
-**ВАЖНО:** Всегда проверяйте `auth_date` (не старше 86400 секунд).
 
 ### 3.2 JWT Tokens
 
-После успешной аутентификации выдаётся JWT токен:
-
 ```python
-from jose import jwt
+from jose import JWTError, jwt
 from datetime import datetime, timedelta
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPBearer
 
-def create_jwt_token(user_id: int, is_superadmin: bool = False) -> str:
-    payload = {
-        "sub": str(user_id),
-        "is_superadmin": is_superadmin,
-        "exp": datetime.utcnow() + timedelta(minutes=settings.jwt_expire_minutes),
-        "iat": datetime.utcnow()
-    }
-    return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+security = HTTPBearer()
+
+class JWTManager:
+    def __init__(self, secret_key: str, algorithm: str = "HS256"):
+        self.secret_key = secret_key
+        self.algorithm = algorithm
+        self.ACCESS_TOKEN_EXPIRE = timedelta(days=7)
+
+    def create_access_token(self, telegram_id: int) -> str:
+        expire = datetime.utcnow() + self.ACCESS_TOKEN_EXPIRE
+
+        payload = {
+            "sub": str(telegram_id),
+            "exp": expire,
+            "iat": datetime.utcnow(),
+            "type": "access"
+        }
+
+        return jwt.encode(payload, self.secret_key, algorithm=self.algorithm)
+
+    def verify_token(self, token: str) -> int:
+        try:
+            payload = jwt.decode(token, self.secret_key, algorithms=[self.algorithm])
+            telegram_id = int(payload.get("sub"))
+
+            if not telegram_id:
+                raise JWTError("Invalid payload")
+
+            return telegram_id
+        except JWTError as e:
+            raise HTTPException(401, f"Invalid token: {e}")
 ```
 
-**Безопасность JWT:**
-- Используйте длинный случайный `JWT_SECRET_KEY` (минимум 32 байта)
-- Срок жизни: 7 дней по умолчанию
-- Токен нельзя отозвать до истечения (для revocation нужен Redis/DB blacklist)
-
-### 3.3 RBAC (Role-Based Access Control)
-
-Три роли:
-
-1. **User** - доступ только к своим чатам
-2. **Chat Admin** - может экспортировать и настраивать чат
-3. **Superadmin** - глобальная статистика без доступа к контенту
-
-**Проверка доступа:**
+### 3.3 Rate Limiting на Auth
 
 ```python
-async def check_chat_access(user_id: int, chat_id: int) -> bool:
-    # User must be a member of the chat
-    result = await db.execute(
-        "SELECT 1 FROM chat_members WHERE user_id = ? AND chat_id = ? AND left_at IS NULL",
-        (user_id, chat_id)
-    )
-    return result.fetchone() is not None
+from fastapi import HTTPException
+
+@app.post("/api/auth/request-otp")
+async def request_otp(telegram_id: int):
+    # Rate limiting: 3 запроса в минуту
+    rate_key = f"otp_rate:{telegram_id}"
+    count = redis.get(rate_key)
+
+    if count and int(count) >= 3:
+        raise HTTPException(429, "Too many requests. Wait 1 minute.")
+
+    redis.incr(rate_key)
+    redis.expire(rate_key, 60)
+
+    otp = otp_manager.generate_otp(telegram_id)
+    await send_otp_to_telegram(telegram_id, otp)
+
+    return {"message": "OTP sent"}
 ```
-
-### 3.4 Superadmin
-
-Superadmin НЕ имеет доступа к содержимому чатов, только к:
-- Агрегированной статистике (количество сообщений, токенов)
-- Отправке уведомлений пользователям
-- Audit log (но без содержимого сообщений)
-
-**Создание superadmin пароля:**
-
-```python
-from passlib.context import CryptContext
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-password_hash = pwd_context.hash("your_secure_password")
-print(f"SUPERADMIN_PASSWORD_HASH={password_hash}")
-```
-
-Добавьте hash в `.env`.
 
 ---
 
-## 4. SQL Injection Prevention
+## 4. Защита от атак
 
-### 4.1 SQL-агент: многоуровневая защита
+### 4.1 SQL Injection
 
-```python
-class SafeSQLAgent:
-    FORBIDDEN = ["DELETE", "DROP", "UPDATE", "INSERT", "ALTER", "CREATE", "EXEC", "PRAGMA"]
-
-    def _is_safe(self, sql: str, chat_id: int) -> bool:
-        sql_upper = sql.upper()
-
-        # 1. Только SELECT
-        if not sql_upper.strip().startswith("SELECT"):
-            return False
-
-        # 2. Запрещённые ключевые слова
-        if any(kw in sql_upper for kw in self.FORBIDDEN):
-            return False
-
-        # 3. ОБЯЗАТЕЛЬНЫЙ WHERE chat_id = X
-        chat_id_filter = f"chat_id = {chat_id}"
-        if chat_id_filter not in sql.replace(" ", ""):
-            return False
-
-        # 4. Нет подстрок вида "; DROP" или "-- comment"
-        if ";" in sql or "--" in sql:
-            return False
-
-        return True
-```
-
-### 4.2 Read-only соединение
-
-Для SQL-агента используется отдельное read-only соединение к БД:
+**✅ ВСЕГДА параметризованные запросы:**
 
 ```python
-import aiosqlite
-
-async def execute_read_only(sql: str) -> list:
-    # Execute SELECT with read-only connection
-    async with aiosqlite.connect(
-        settings.database_path,
-        uri=True,
-        timeout=5.0
-    ) as db:
-        # Read-only mode
-        await db.execute("PRAGMA query_only = ON")
-
-        cursor = await db.execute(sql)
-        return await cursor.fetchall()
-```
-
-### 4.3 Примеры БЛОКИРУЕМЫХ запросов
-
-```sql
--- ❌ Нет WHERE chat_id
-SELECT * FROM messages LIMIT 10
-
--- ❌ UPDATE вместо SELECT
-UPDATE messages SET content_encrypted = 'hacked' WHERE chat_id = 123
-
--- ❌ SQL injection попытка
-SELECT * FROM messages WHERE chat_id = 123; DROP TABLE users; --
-
--- ❌ Доступ к другим чатам
-SELECT * FROM messages WHERE chat_id IN (123, 456)
-```
-
-### 4.4 Примеры РАЗРЕШЁННЫХ запросов
-
-```sql
--- ✅ Простой SELECT
-SELECT COUNT(*) FROM messages WHERE chat_id = 123
-
--- ✅ С JOIN
-SELECT u.username, COUNT(*) as msg_count 
-FROM messages m 
-JOIN users u ON m.user_id = u.id 
-WHERE m.chat_id = 123 
-GROUP BY u.username
-
--- ✅ С подзапросом (если нужен)
-SELECT AVG(msg_count) FROM (
-  SELECT COUNT(*) as msg_count 
-  FROM messages 
-  WHERE chat_id = 123 
-  GROUP BY DATE(timestamp)
+# ✅ ПРАВИЛЬНО
+chat_id = 123
+rows = await db.execute(
+    "SELECT * FROM messages WHERE chat_id = ?",
+    (chat_id,)
 )
+
+# ❌ НЕПРАВИЛЬНО - SQL Injection!
+rows = await db.execute(f"SELECT * FROM messages WHERE chat_id = {chat_id}")
+```
+
+**SQL Validator для Analytics Skill:**
+
+```python
+import sqlparse
+
+class SQLValidator:
+    ALLOWED_COMMANDS = {'SELECT'}
+    FORBIDDEN_KEYWORDS = {
+        'DROP', 'DELETE', 'INSERT', 'UPDATE', 'ALTER', 
+        'CREATE', 'TRUNCATE', 'REPLACE'
+    }
+
+    def validate(self, query: str) -> tuple[bool, str]:
+        parsed = sqlparse.parse(query)
+
+        if not parsed:
+            return False, "Empty query"
+
+        query_upper = query.upper()
+        for forbidden in self.FORBIDDEN_KEYWORDS:
+            if forbidden in query_upper:
+                return False, f"Forbidden: {forbidden}"
+
+        if '--' in query or '/*' in query:
+            return False, "Comments not allowed"
+
+        return True, "Valid"
+
+validator = SQLValidator()
+
+async def execute_user_query(query: str, chat_id: int):
+    is_valid, error = validator.validate(query)
+    if not is_valid:
+        raise ValueError(f"Invalid query: {error}")
+
+    if 'LIMIT' not in query.upper():
+        query += ' LIMIT 100'
+
+    result = await db.execute(query)
+    return await result.fetchall()
+```
+
+### 4.2 Command Injection
+
+```python
+import re
+import subprocess
+
+def sanitize_filename(filename: str) -> str:
+    safe = re.sub(r'[^a-zA-Z0-9_-]', '', filename)
+
+    if not safe:
+        raise ValueError("Invalid filename")
+
+    return safe[:100]
+
+# ✅ ПРАВИЛЬНО
+filename = sanitize_filename(user_input)
+subprocess.run(
+    ['tar', '-czf', f'{filename}.tar.gz', 'data/'],
+    check=True,
+    timeout=30
+)
+
+# ❌ НЕПРАВИЛЬНО
+os.system(f"tar -czf {user_input}.tar.gz data/")
+```
+
+### 4.3 XSS Protection
+
+```typescript
+// React автоматически экранирует
+function MessageComponent({ message }) {
+  return <div>{message.content}</div>;  // Безопасно
+}
+
+// Если нужен HTML - используйте DOMPurify
+import DOMPurify from 'dompurify';
+
+function MessageComponent({ message }) {
+  const clean = DOMPurify.sanitize(message.content);
+  return <div dangerouslySetInnerHTML={{__html: clean}} />;
+}
+```
+
+### 4.4 CSRF Protection
+
+```python
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class CSRFMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        if request.method in ['POST', 'PUT', 'DELETE']:
+            origin = request.headers.get('origin')
+
+            if origin not in settings.CORS_ORIGINS:
+                raise HTTPException(403, "Invalid origin")
+
+        return await call_next(request)
+
+app.add_middleware(CSRFMiddleware)
 ```
 
 ---
 
 ## 5. Rate Limiting
 
-### 5.1 API Rate Limits
-
-Реализация через `slowapi`:
+### 5.1 Per-Endpoint Limits
 
 ```python
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 limiter = Limiter(key_func=get_remote_address)
 
-@app.post("/api/v1/chat/query")
-@limiter.limit("30/minute")
-async def sql_agent_query(request: Request, ...):
-    ...
+@app.get("/api/stats/messages")
+@limiter.limit("100/minute")
+async def get_stats():
+    pass
+
+@app.post("/api/summary/manual")
+@limiter.limit("10/hour")
+async def manual_summary():
+    pass
+
+@app.get("/api/export/csv")
+@limiter.limit("5/hour")
+async def export_csv():
+    pass
 ```
 
-**Лимиты по эндпоинтам:**
-
-| Эндпоинт          | Лимит         | Причина                           |
-|-------------------|---------------|-----------------------------------|
-| `/auth/*`         | 5/min         | Защита от brute-force             |
-| `/chat/query`     | 30/min        | Дорогие LLM вызовы                |
-| `/chat/*/history` | 60/min        | Защита от data scraping           |
-| `/settings/*`     | 10/min        | Редкие операции                   |
-| `/admin/*`        | 100/min       | Superadmin, но всё равно limit    |
-
-### 5.2 Telegram Rate Limits
-
-Telegram API имеет жёсткие лимиты:
-- **Глобально:** 30 сообщений/сек для всего бота
-- **Per-chat:** 1 сообщение/сек в одном чате
-- **Per-user (PM):** 1 сообщение/сек
-
-**Реализация через asyncio.Queue:**
+### 5.2 Redis Rate Limiter
 
 ```python
-import asyncio
-from collections import defaultdict
+class RedisRateLimiter:
+    def __init__(self, redis_client):
+        self.redis = redis_client
 
-class TelegramRateLimiter:
-    def __init__(self, global_rate: int = 30, per_chat_rate: float = 1.0):
-        self.global_queue = asyncio.Queue()
-        self.chat_queues = defaultdict(asyncio.Queue)
-        self.global_rate = global_rate
-        self.per_chat_rate = per_chat_rate
+    async def check_limit(self, key: str, limit: int, window: int) -> bool:
+        current = int(datetime.now().timestamp())
+        window_start = current - window
 
-    async def send_message(self, chat_id: int, text: str):
-        # Add to chat-specific queue
-        await self.chat_queues[chat_id].put((chat_id, text))
+        await self.redis.zremrangebyscore(key, 0, window_start)
 
-        # Process with rate limiting
-        await asyncio.sleep(self.per_chat_rate)
-        _, msg = await self.chat_queues[chat_id].get()
+        count = await self.redis.zcard(key)
 
-        # Send via bot API
-        await bot.send_message(chat_id, msg)
+        if count >= limit:
+            return False
+
+        await self.redis.zadd(key, {str(current): current})
+        await self.redis.expire(key, window)
+
+        return True
 ```
 
 ---
 
 ## 6. Audit Logging
 
-### 6.1 Что логируется
+### 6.1 Что логировать
 
-Все чувствительные операции записываются в `audit_log`:
+**✅ Логировать:**
+- Аутентификацию (успех/неудача)
+- SQL запросы пользователей
+- Изменения настроек
+- Экспорт данных
+- Включение/выключение Skills
+
+**❌ НЕ логировать:**
+- Пароли, токены, API ключи
+- Содержимое сообщений (если не требуется)
+- Персональные данные без необходимости
+
+### 6.2 Реализация
 
 ```python
+import json
+
 async def audit_log(
-    user_id: int | None,  # None для system actions
+    user_id: int,
     action: str,
-    chat_id: int | None = None,
-    details: dict | None = None
+    chat_id: int = None,
+    details: dict = None,
+    success: bool = True,
+    error: str = None
 ):
-    await db.execute(
-        "INSERT INTO audit_log (user_id, action, chat_id, details, timestamp) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
-        (user_id, action, chat_id, json.dumps(details) if details else None)
-    )
-```
+    if details:
+        details = sanitize_audit_details(details)
 
-**Типы действий:**
-- `sql_query` - выполнен SQL-агент запрос
-- `sql_query_blocked` - заблокирован небезопасный SQL
-- `export_chat` - экспорт истории чата
-- `update_settings` - изменение настроек чата
-- `admin_notify` - superadmin отправил уведомление
-- `gdpr_delete` - удаление данных пользователя
+    await db.execute('''
+        INSERT INTO audit_log 
+        (user_id, action, chat_id, details, success, error_message)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (
+        user_id,
+        action,
+        chat_id,
+        json.dumps(details) if details else None,
+        success,
+        error
+    ))
 
-### 6.2 Retention политика
+def sanitize_audit_details(details: dict) -> dict:
+    sensitive_keys = {'password', 'token', 'api_key', 'secret', 'otp'}
 
-Audit log хранится **бессрочно** (или согласно корпоративной политике).
-
-Для очистки старых записей:
-
-```sql
--- Удалить записи старше 1 года
-DELETE FROM audit_log WHERE timestamp < datetime('now', '-1 year');
-```
-
-### 6.3 Мониторинг подозрительной активности
-
-Примеры запросов для детекции:
-
-```sql
--- Частые неудачные SQL-запросы одного пользователя
-SELECT user_id, COUNT(*) as failed_count
-FROM audit_log
-WHERE action = 'sql_query_blocked'
-  AND timestamp > datetime('now', '-1 hour')
-GROUP BY user_id
-HAVING failed_count > 10;
-
--- Массовый экспорт чатов
-SELECT user_id, COUNT(DISTINCT chat_id) as exported_chats
-FROM audit_log
-WHERE action = 'export_chat'
-  AND timestamp > datetime('now', '-1 day')
-GROUP BY user_id
-HAVING exported_chats > 5;
-```
-
----
-
-## 7. Input Validation
-
-### 7.1 Pydantic Models
-
-Все входные данные валидируются через Pydantic:
-
-```python
-from pydantic import BaseModel, validator, Field
-
-class ChatQueryRequest(BaseModel):
-    chat_id: int = Field(..., ge=-9999999999999, le=-1)
-    question: str = Field(..., min_length=3, max_length=500)
-
-    @validator('question')
-    def question_not_empty(cls, v):
-        if not v.strip():
-            raise ValueError('Question cannot be empty')
-        return v.strip()
-```
-
-### 7.2 XSS Protection
-
-FastAPI автоматически экранирует HTML в JSON responses.
-
-Для Jinja2 templates:
-
-```html
-<!-- Автоматическое экранирование -->
-<p>{{ user_message }}</p>
-
-<!-- Явное экранирование (если нужно) -->
-<p>{{ user_message | e }}</p>
-```
-
-### 7.3 Path Traversal Protection
-
-При экспорте файлов:
-
-```python
-import os
-from pathlib import Path
-
-def safe_export_path(chat_id: int) -> Path:
-    # Generate safe file path for export
-    export_dir = Path("exports")
-    export_dir.mkdir(exist_ok=True)
-
-    safe_filename = f"export_{abs(chat_id)}_{int(time.time())}.txt"
-
-    full_path = (export_dir / safe_filename).resolve()
-    if not str(full_path).startswith(str(export_dir.resolve())):
-        raise ValueError("Path traversal attempt detected")
-
-    return full_path
-```
-
----
-
-## 8. Secrets Management
-
-### 8.1 .env файл
-
-**НИКОГДА не коммитьте `.env` в git!**
-
-Добавьте в `.gitignore`:
-```
-.env
-.env.local
-.env.production
-*.key
-*.pem
-```
-
-### 8.2 Генерация секретов
-
-```bash
-# Master encryption key (32 bytes)
-python -c "import secrets, base64; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
-
-# JWT secret key
-python -c "import secrets; print(secrets.token_urlsafe(32))"
-
-# Superadmin password hash
-python -c "from passlib.context import CryptContext; print(CryptContext(schemes=['bcrypt']).hash('YOUR_PASSWORD'))"
-```
-
-### 8.3 Пример .env
-
-```env
-# === Telegram ===
-TELEGRAM_BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
-
-# === LLM ===
-LLM_BASE_URL=https://openrouter.ai/api/v1
-LLM_API_KEY=sk-or-v1-xxxxxxxxxxxxxxxxxxxx
-LLM_MODEL_NAME=anthropic/claude-3.5-sonnet
-
-# === Security (GENERATE NEW KEYS!) ===
-ENCRYPTION_MASTER_KEY=XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-JWT_SECRET_KEY=YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY
-SUPERADMIN_PASSWORD_HASH=$2b$12$ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ
-
-# === Database ===
-DATABASE_URL=sqlite+aiosqlite:///./data/chat_data.db
-DATABASE_PATH=data/chat_data.db
-
-# === Server ===
-HOST=0.0.0.0
-PORT=8000
-DEBUG=false
-```
-
----
-
-## 9. HTTPS и Network Security
-
-### 9.1 Обязательно HTTPS в production
-
-Используйте Let's Encrypt + Nginx:
-
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name your-domain.com;
-
-    ssl_certificate /etc/letsencrypt/live/your-domain.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/your-domain.com/privkey.pem;
-
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers HIGH:!aNULL:!MD5;
-
-    location / {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
+    return {
+        k: '***REDACTED***' if k.lower() in sensitive_keys else v
+        for k, v in details.items()
     }
-}
-```
-
-### 9.2 CORS Configuration
-
-```python
-from fastapi.middleware.cors import CORSMiddleware
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["https://your-frontend-domain.com"],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
-    allow_headers=["Authorization", "Content-Type"],
-)
 ```
 
 ---
 
-## 10. Backup и Recovery
+## 7. Secrets Management
 
-### 10.1 Backup Strategy
-
-**Ежедневный backup БД:**
+### 7.1 Environment Variables
 
 ```bash
-#!/bin/bash
-BACKUP_DIR="/backups"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-DB_PATH="data/chat_data.db"
+# .env (добавить в .gitignore!)
 
-sqlite3 $DB_PATH ".backup $BACKUP_DIR/chat_data_$TIMESTAMP.db"
-gzip $BACKUP_DIR/chat_data_$TIMESTAMP.db
+MASTER_ENCRYPTION_KEY=hN6p3RlK4Qm9Xw2Yv8Zt5Bf7Cg1Dj0Ek6Lh3Mn4Op2Qr==
+JWT_SECRET_KEY=super-secret-jwt-key-change-me
+TELEGRAM_BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
+DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
-# Encrypt backup
-gpg --symmetric --cipher-algo AES256 --batch --yes --passphrase-file /root/.backup_passphrase $BACKUP_DIR/chat_data_$TIMESTAMP.db.gz
+DATABASE_URL=postgresql://user:password@localhost/dbname
+REDIS_URL=redis://localhost:6379/0
 
-# Remove old backups (keep 30 days)
-find $BACKUP_DIR -name "chat_data_*.db.gz.gpg" -mtime +30 -delete
+CORS_ORIGINS=http://localhost:3000,https://your-domain.com
+```
+
+**⚠️ НИКОГДА:**
+- НЕ коммитьте `.env` в Git
+- НЕ храните секреты в коде
+- НЕ логируйте секреты
+
+### 7.2 Docker Secrets
+
+```yaml
+# docker-compose.yml
+version: '3.8'
+
+services:
+  app:
+    image: telegram-bot:latest
+    secrets:
+      - master_encryption_key
+      - jwt_secret
+    environment:
+      MASTER_ENCRYPTION_KEY_FILE: /run/secrets/master_encryption_key
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+
+secrets:
+  master_encryption_key:
+    file: ./secrets/master_encryption_key.txt
+  jwt_secret:
+    file: ./secrets/jwt_secret.txt
 ```
 
 ---
 
-## 11. Compliance
+## 8. GDPR и конфиденциальность
 
-### 11.1 GDPR
-
-**Права пользователя:**
-- **Right to access:** экспорт своих данных через `/export`
-- **Right to erasure:** полное удаление данных чата
-- **Right to rectification:** изменение данных профиля
-
-**Реализация "Right to be forgotten":**
+### 8.1 Data Retention
 
 ```python
-async def gdpr_delete_user_data(user_id: int):
-    # Complete user data deletion
+async def enforce_retention_policy():
+    retention_days = settings.RETENTION_DAYS
+    cutoff = datetime.now() - timedelta(days=retention_days)
 
-    chats = await db.get_user_chats(user_id)
+    result = await db.execute(
+        "DELETE FROM messages WHERE timestamp < ?",
+        (cutoff,)
+    )
 
-    for chat in chats:
-        await db.execute(
-            "DELETE FROM messages WHERE user_id = ? AND chat_id = ?",
-            (user_id, chat.id)
-        )
+    audit_cutoff = datetime.now() - timedelta(days=365)
+    await db.execute(
+        "DELETE FROM audit_log WHERE timestamp < ?",
+        (audit_cutoff,)
+    )
 
-    await db.execute("DELETE FROM chat_members WHERE user_id = ?", (user_id,))
-    await db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    await db.execute("VACUUM")
 
-    await audit_log(None, "gdpr_delete", None, {"deleted_user_id": user_id})
+@scheduler.scheduled_job('cron', hour=3, minute=0)
+async def daily_cleanup():
+    await enforce_retention_policy()
 ```
 
-### 11.2 Data Retention
+### 8.2 Right to be Forgotten
 
-По умолчанию: **90 дней** (`RETENTION_DAYS=90`).
-
----
-
-## 12. Security Checklist
-
-### Перед деплоем в production:
-
-- [ ] Сгенерированы уникальные секреты
-- [ ] `.env` добавлен в `.gitignore`
-- [ ] HTTPS настроен с валидным сертификатом
-- [ ] Firewall разрешает только 443 и 22 порты
-- [ ] SQLite файл не доступен через веб
-- [ ] Superadmin пароль достаточно сложный (>16 символов)
-- [ ] Rate limiting включен на всех эндпоинтах
-- [ ] CORS настроен с конкретными origins (не `*`)
-- [ ] Backup скрипт настроен и протестирован
-- [ ] Audit log мониторится
-- [ ] DEBUG=false в production
-- [ ] SQL-агент протестирован на injection
-- [ ] Dependencies обновлены
-- [ ] Retention policy настроена
+```python
+async def delete_user_data(user_id: int):
+    async with db.transaction():
+        await db.execute("DELETE FROM messages WHERE user_id = ?", (user_id,))
+        await db.execute("DELETE FROM llm_usage WHERE user_id = ?", (user_id,))
+        await db.execute("UPDATE audit_log SET user_id = NULL WHERE user_id = ?", (user_id,))
+        await db.execute("DELETE FROM chat_members WHERE user_id = ?", (user_id,))
+        await db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+```
 
 ---
 
-**Версия:** 1.0 | **Статус:** Ready for Production | **Дата:** 2026-01-25
+## 9. Deployment Security
+
+### 9.1 Production Checklist
+
+**Secrets:**
+- [ ] Все ключи в `.env` или Docker secrets
+- [ ] `.env` в `.gitignore`
+- [ ] Backup ключей в защищенном месте
+
+**Database:**
+- [ ] Шифрование включено
+- [ ] Регулярные backups
+- [ ] Минимальные права доступа
+
+**API:**
+- [ ] HTTPS (Let's Encrypt)
+- [ ] CORS настроен
+- [ ] Rate limiting активен
+
+**Monitoring:**
+- [ ] Audit logging работает
+- [ ] Alerts на критические события
+
+### 9.2 Docker Security
+
+```dockerfile
+FROM python:3.11-slim
+
+# Не запускаем от root
+RUN useradd -m -u 1000 botuser
+USER botuser
+
+COPY --chown=botuser:botuser requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY --chown=botuser:botuser app/ /app/
+
+HEALTHCHECK --interval=30s --timeout=3s   CMD python -c "import requests; requests.get('http://localhost:8000/api/health')"
+
+CMD ["python", "-m", "app.main"]
+```
+
+---
+
+## 10. Incident Response
+
+### 10.1 При утечке
+
+**Немедленные действия:**
+
+```bash
+# 1. Остановить сервис
+docker-compose down
+
+# 2. Сохранить логи
+docker-compose logs > incident_logs.txt
+
+# 3. Уведомить пользователей (GDPR)
+```
+
+**Анализ:**
+
+```python
+async def analyze_incident(start_time: datetime):
+    failed_logins = await db.execute('''
+        SELECT user_id, COUNT(*) as attempts
+        FROM audit_log
+        WHERE action = 'web_login' 
+          AND success = 0
+          AND timestamp > ?
+        GROUP BY user_id
+        HAVING attempts > 5
+    ''', (start_time,))
+
+    return {"failed_logins": list(failed_logins)}
+```
+
+**Восстановление:**
+
+```bash
+# Смена ключей
+python scripts/rotate_keys.py
+
+# Восстановление из backup
+./scripts/restore.sh backups/chat_data.db.gz
+
+# Перезапуск
+docker-compose up -d
+```
+
+---
+
+## 11. Security Checklist
+
+### Перед деплоем
+
+- [ ] Все секреты в environment variables
+- [ ] `.env` в `.gitignore`
+- [ ] HTTPS настроен
+- [ ] CORS сконфигурирован
+- [ ] Rate limiting активен
+- [ ] Audit logging работает
+- [ ] Database backups настроены
+- [ ] Encryption keys созданы
+- [ ] Docker security применен
+- [ ] Health checks работают
+
+### Регулярно (ежемесячно)
+
+- [ ] Анализ audit log
+- [ ] Проверка failed logins
+- [ ] Обновление зависимостей
+- [ ] Тест backup/restore
+- [ ] Review прав доступа
+
+---
+
+## 12. Заключение
+
+### Основные принципы безопасности
+
+🔐 **Шифрование** - per-chat AES-256  
+🔑 **Аутентификация** - Telegram 2FA + JWT  
+🛡️ **Защита** - SQL/XSS/CSRF prevention  
+📊 **Мониторинг** - audit logging  
+⚡ **Rate Limiting** - защита от abuse  
+🔒 **Secrets** - только в env  
+📜 **GDPR** - compliance  
+
+### Ресурсы
+
+- [OWASP Top 10](https://owasp.org/www-project-top-ten/)
+- [NIST Cybersecurity](https://www.nist.gov/cyberframework)
+- [CIS Docker Benchmarks](https://www.cisecurity.org/benchmark/docker)
+
+---
+
+**Версия:** 2.0 | **Дата:** 2026-01-28 | **Статус:** Production-Ready
