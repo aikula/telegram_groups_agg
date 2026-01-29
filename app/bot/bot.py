@@ -69,9 +69,11 @@ async def set_bot_commands() -> None:
     private_commands = [
         BotCommand(command="start", description="Начать работу / Показать справку"),
         BotCommand(command="help", description="Показать справку"),
+        BotCommand(command="login", description="Вход в веб-интерфейс"),
         BotCommand(command="stats", description="Статистика чата"),
         BotCommand(command="export", description="Экспорт истории чата"),
         BotCommand(command="settings", description="Настройки чата"),
+        BotCommand(command="diagnostics", description="Диагностика бота"),
     ]
 
     # Group chat commands
@@ -83,6 +85,7 @@ async def set_bot_commands() -> None:
         BotCommand(command="settings", description="Настройки чата"),
         BotCommand(command="summarize_thread", description="Сводка обсуждения (ответить на сообщение)"),
         BotCommand(command="ask", description="Задать вопрос о чате"),
+        BotCommand(command="diagnostics", description="Диагностика бота"),
     ]
 
     await bot.set_my_commands(
