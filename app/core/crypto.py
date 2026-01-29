@@ -209,8 +209,10 @@ class ChatCrypto:
                 return False
 
             # Length should be multiple of 16 bytes (AES block size) + version byte
-            # After removing version byte, the rest should be divisible by 16
-            return (len(decoded) - 1) % 16 == 0
+            # Fernet structure: version(1) + timestamp(8) + IV(16) + ciphertext(N*16) + HMAC(32)
+            # Fixed overhead: 1 + 8 + 16 + 32 = 57 bytes
+            # Total length = 57 + N*16 where N >= 1
+            return (len(decoded) - 57) % 16 == 0
 
         except (ValueError, TypeError):
             return False

@@ -1,5 +1,5 @@
 """
-Tools module - Low-level operations for AI agents (v2.1)
+Tools module - Low-level operations for AI agents (v2.2)
 
 Implements AGENTS.md specification with OpenAI Function Calling format.
 Tools are atomic functions that can be called by LLM agents.
@@ -14,6 +14,12 @@ Security v2.2:
 - Mandatory LIMIT clause with max value check
 - Query complexity limits (JOINs, length)
 - Dangerous function detection
+- Sensitive data redaction in logs
+
+New v2.2:
+- Smart parameter extraction from natural language
+- Context size protection with automatic truncation
+- Batch mode for large result sets
 """
 
 import json
@@ -23,6 +29,12 @@ from typing import Dict, Any, Optional, List, Callable
 from datetime import datetime, timedelta
 
 from app.core.db import Database
+from app.core.query_params import (
+    extract_query_params,
+    format_results_with_limit,
+    build_sql_with_params,
+)
+from app.core.log_utils import sanitize_log_query, sanitize_log_args
 
 logger = logging.getLogger(__name__)
 
@@ -42,18 +54,22 @@ TOOL_DEFINITIONS = {
         "type": "function",
         "function": {
             "name": "get_chat_history",
-            "description": "Retrieve recent messages from chat with user information. Use this to get context about what was discussed.",
+            "description": "Retrieve recent messages from chat with user information. Automatically extracts limit/days from your query text.",
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The user's original question for smart parameter extraction (e.g., 'show last 3 messages' → limit=3, 'for a week' → days=7)"
+                    },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum messages to return (default: 20, max: 100)",
+                        "description": "Override: Maximum messages (max: 100)",
                         "default": 20
                     },
                     "days": {
                         "type": "integer",
-                        "description": "Only messages from last N days (default: 7)",
+                        "description": "Override: Only messages from last N days",
                         "default": 7
                     }
                 }
@@ -65,13 +81,13 @@ TOOL_DEFINITIONS = {
         "type": "function",
         "function": {
             "name": "sql_analytics",
-            "description": "Execute safe SELECT SQL query for analytics, statistics, and counts. Must include chat_id filter.",
+            "description": "Execute SQL analytics query. Accepts natural language (e.g., 'count messages this week') or raw SQL. Auto-adds LIMIT, date filter, and chat_id.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "SQL SELECT query with chat_id filter (e.g., SELECT COUNT(*) FROM messages WHERE chat_id = X)"
+                        "description": "Natural language question OR SQL SELECT query. Examples: 'how many messages today', 'top users this week', or raw SQL with chat_id filter"
                     }
                 },
                 "required": ["query"]
@@ -83,10 +99,15 @@ TOOL_DEFINITIONS = {
         "type": "function",
         "function": {
             "name": "general_answer",
-            "description": "Use general LLM knowledge without accessing chat database. Use for questions that don't require chat context.",
+            "description": "Use general LLM knowledge. Automatically includes last 10 messages as chat context. Use for general questions that may benefit from chat awareness.",
             "parameters": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The user's original question (for context)"
+                    }
+                },
                 "required": []
             }
         }
@@ -112,23 +133,43 @@ async def get_chat_history(
     chat_id: int,
     limit: int = 20,
     days: int = 7,
+    query: str = "",
     db: Optional[Database] = None
 ) -> Dict[str, Any]:
     """
     Tool: Get recent chat messages with user information.
 
+    v2.2: Smart parameter extraction from query text.
+    If 'query' is provided, extracts limit/days from natural language.
+
     Args:
         chat_id: Telegram chat ID
-        limit: Maximum messages to return (max: 100)
-        days: Only messages from last N days
+        limit: Maximum messages to return (max: 100, extracted from query if provided)
+        days: Only messages from last N days (extracted from query if provided)
+        query: Original user query for parameter extraction (optional)
         db: Database instance (uses default if None)
 
     Returns:
-        Dict with messages list and count
+        Dict with messages list, count, and metadata
     """
     if db is None:
         from app.core.db import get_database
         db = get_database()
+
+    # Extract parameters from query if provided
+    if query:
+        try:
+            params = await extract_query_params(query)
+            extracted_limit = params.get('limit', limit)
+            extracted_days = params.get('days', days)
+
+            # Use extracted values if more specific
+            if params.get('confidence', 0) > 0.6:
+                limit = extracted_limit
+                days = extracted_days
+                logger.info(f"Extracted params from query: limit={limit}, days={days}")
+        except Exception as e:
+            logger.warning(f"Param extraction failed: {e}, using defaults")
 
     # Validate and clamp parameters
     limit = max(1, min(limit, 100))
@@ -144,7 +185,7 @@ async def get_chat_history(
         exclude_deleted=True
     )
 
-    # Format for LLM consumption
+    # Format for LLM consumption with context protection
     formatted = []
     for msg in messages:
         formatted.append({
@@ -154,9 +195,15 @@ async def get_chat_history(
             "content": msg.get("content", "")
         })
 
+    # Context size protection
+    result_data = await format_results_with_limit(formatted, max_tokens=6000)
+
     return {
-        "messages": formatted,
-        "count": len(formatted)
+        "messages": result_data["results"],
+        "count": result_data["shown_count"],
+        "total_count": len(formatted),
+        "truncated": result_data.get("truncated", False),
+        "message": result_data.get("truncated_message", "")
     }
 
 
@@ -168,6 +215,8 @@ async def sql_analytics(
     """
     Tool: Execute safe SQL analytics query.
 
+    v2.2: Auto-parameters from query + context size protection.
+
     Security features:
     - SELECT queries only
     - Mandatory chat_id filter
@@ -177,17 +226,37 @@ async def sql_analytics(
 
     Args:
         chat_id: Telegram chat ID (for filtering and validation)
-        query: SQL SELECT query
+        query: SQL SELECT query (can be incomplete - params added automatically)
         db: Database instance (uses default if None)
 
     Returns:
-        Dict with columns, data, and count
+        Dict with columns, data, count, and metadata
     """
     if db is None:
         from app.core.db import get_database
         db = get_database()
 
-    logger.info(f"Tool sql_analytics: chat_id={chat_id}, query={query[:100]}...")
+    logger.info(f"Tool sql_analytics: chat_id={chat_id}, query={sanitize_log_query(query, max_length=100)}")
+
+    # Extract parameters from query if it's a natural language description
+    # (starts with non-SQL keywords like "show", "count", etc.)
+    is_natural_language = not query.strip().upper().startswith(('SELECT', 'WITH'))
+
+    if is_natural_language:
+        # Extract params and build proper SQL
+        try:
+            params = await extract_query_params(query)
+
+            # Build base query from natural language intent
+            base_query = _build_sql_from_intent(query, chat_id)
+
+            # Add extracted parameters
+            query = build_sql_with_params(base_query, params, chat_id)
+
+            logger.info(f"Built SQL from natural language: {sanitize_log_query(query, max_length=100)}")
+        except Exception as e:
+            logger.warning(f"SQL building failed: {e}")
+            # Fall through to validation with original query
 
     # Security validation
     validation = _validate_sql_query(query, chat_id)
@@ -213,10 +282,16 @@ async def sql_analytics(
         # Extract columns from first row
         columns = list(results[0].keys()) if results else []
 
+        # Context size protection for large results
+        result_data = await format_results_with_limit(results, max_tokens=8000)
+
         return {
             "columns": columns,
-            "data": results,
-            "count": len(results)
+            "data": result_data["results"],
+            "count": result_data["shown_count"],
+            "total_count": len(results),
+            "truncated": result_data.get("truncated", False),
+            "message": result_data.get("truncated_message", "")
         }
 
     except Exception as e:
@@ -228,20 +303,129 @@ async def sql_analytics(
         }
 
 
-async def general_answer() -> Dict[str, Any]:
+async def general_answer(
+    chat_id: int,
+    query: str = "",
+    db: Optional[Database] = None
+) -> Dict[str, Any]:
     """
-    Tool: Placeholder for general knowledge answer.
+    Tool: Use LLM general knowledge with chat context.
 
-    This is a no-op tool that signals the LLM should use
-    its general knowledge without accessing the database.
+    Automatically includes last 10 messages as context for the LLM.
+    This allows the LLM to answer general questions while being
+    aware of the chat context.
+
+    Args:
+        chat_id: Telegram chat ID (for context loading)
+        query: Original user query (optional, for logging)
+        db: Database instance (uses default if None)
 
     Returns:
-        Dict indicating general knowledge should be used
+        Dict with chat context for LLM
     """
+    if db is None:
+        from app.core.db import get_database
+        db = get_database()
+
+    # Always load minimal chat context (last 10 messages)
+    messages = await db.get_messages(
+        chat_id=chat_id,
+        limit=10,
+        days=7,
+        exclude_deleted=True
+    )
+
+    # Format messages for context
+    formatted_context = []
+    for msg in messages:
+        username = msg.get("username") or msg.get("first_name", "Unknown")
+        content = msg.get("content", "")[:200]  # Truncate long messages
+        timestamp = msg.get("timestamp", "")
+
+        formatted_context.append({
+            "timestamp": timestamp,
+            "username": username,
+            "content": content
+        })
+
     return {
-        "message": "Use your general knowledge to answer this question",
-        "tool": "general_answer"
+        "tool": "general_answer",
+        "chat_context": {
+            "chat_id": chat_id,
+            "messages_count": len(formatted_context),
+            "recent_messages": formatted_context
+        },
+        "message": "Answer the question using your general knowledge, "
+                  "but be aware of the chat context provided above"
     }
+
+
+# ============================================================================
+# Natural Language to SQL Builder
+# ============================================================================
+
+def _build_sql_from_intent(query: str, chat_id: int) -> str:
+    """
+    Build base SQL query from natural language intent.
+
+    Analyzes the query to determine what the user wants:
+    - Count queries ("сколько", "количество") → COUNT(*)
+    - List queries ("покажи", "список", "все") → SELECT *
+    - User stats ("кто написал", "активность") → GROUP BY user_id
+    - Time stats ("по дням", "по часам") → GROUP BY date/time
+
+    Args:
+        query: Natural language query
+        chat_id: Chat ID for filtering
+
+    Returns:
+        Base SQL query (without LIMIT/date filter)
+
+    Security: chat_id is validated as integer to prevent SQL injection.
+              The query is later validated by _validate_sql_query().
+    """
+    # Validate chat_id is a safe integer value
+    if not isinstance(chat_id, int) or chat_id <= 0 or chat_id > 2**63 - 1:
+        # Return safe default query that will fail validation
+        logger.warning(f"Invalid chat_id value in _build_sql_from_intent: {chat_id}")
+        return "SELECT 1 WHERE 1=0"
+
+    query_lower = query.lower()
+
+    # Count queries
+    count_patterns = [
+        r'сколько',
+        r'количество',
+        r'count',
+        r'число',
+        r'много',
+        r'всего',
+    ]
+
+    for pattern in count_patterns:
+        if re.search(pattern, query_lower):
+            return f"SELECT COUNT(*) as count FROM messages WHERE chat_id = {chat_id}"
+
+    # User activity queries
+    user_patterns = [
+        r'кто\s+написал',
+        r'активность\s+пользовател',
+        r'топ\s+пользовател',
+        r'most\s+active',
+        r'user\s+activity',
+    ]
+
+    for pattern in user_patterns:
+        if re.search(pattern, query_lower):
+            return f"""
+                SELECT u.username, COUNT(*) as message_count
+                FROM messages m
+                JOIN users u ON m.user_id = u.id
+                WHERE m.chat_id = {chat_id}
+            """
+
+    # Default: list messages
+    return f"SELECT * FROM messages WHERE chat_id = {chat_id}"
 
 
 # ============================================================================
@@ -465,7 +649,7 @@ async def execute_tool_call(
         logger.error(f"Invalid tool arguments JSON: {e}")
         return {"error": f"Invalid arguments: {e}"}
 
-    logger.info(f"Executing tool: {function_name} with args: {arguments}")
+    logger.info(f"Executing tool: {function_name} with args: {sanitize_log_args(arguments)}")
 
     # Map tool names to functions
     tools_map: Dict[str, Callable] = {
@@ -479,7 +663,11 @@ async def execute_tool_call(
             db=db,
             **arguments
         ),
-        "general_answer": lambda: general_answer()
+        "general_answer": lambda: general_answer(
+            chat_id=chat_id,
+            db=db,
+            **arguments
+        )
     }
 
     if function_name not in tools_map:
@@ -500,9 +688,9 @@ async def execute_tool_call(
 def get_tool_description(tool_name: str) -> str:
     """Get human-readable description of a tool."""
     descriptions = {
-        "get_chat_history": "Retrieve chat messages with user info",
-        "sql_analytics": "Execute SQL queries for statistics",
-        "general_answer": "Use general knowledge without database"
+        "get_chat_history": "Retrieve chat messages with user info (smart params)",
+        "sql_analytics": "Execute SQL queries for statistics (natural language OK)",
+        "general_answer": "Use general knowledge WITH chat context (last 10 messages)"
     }
     return descriptions.get(tool_name, "Unknown tool")
 

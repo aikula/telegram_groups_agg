@@ -34,9 +34,13 @@ async def export_csv(
     Returns:
         CSV file download
     """
-    from app.web.middleware import required_auth
+    from app.web.middleware import required_auth, require_chat_membership
 
-    await required_auth(request)
+    user = await required_auth(request)
+
+    # If chat_id is specified, verify user has access to this chat
+    if chat_id is not None:
+        await require_chat_membership(request, chat_id)
 
     db = request.app.state.db
 
@@ -109,10 +113,14 @@ async def export_json(
     Returns:
         JSON file download
     """
-    from app.web.middleware import required_auth
+    from app.web.middleware import required_auth, require_chat_membership
     import json
 
-    await required_auth(request)
+    user = await required_auth(request)
+
+    # If chat_id is specified, verify user has access to this chat
+    if chat_id is not None:
+        await require_chat_membership(request, chat_id)
 
     db = request.app.state.db
 
@@ -166,10 +174,14 @@ async def export_stats(
     Returns:
         Statistics JSON
     """
-    from app.web.middleware import required_auth
+    from app.web.middleware import required_auth, require_chat_membership
     import json
 
-    await required_auth(request)
+    user = await required_auth(request)
+
+    # If chat_id is specified, verify user has access to this chat
+    if chat_id is not None:
+        await require_chat_membership(request, chat_id)
 
     db = request.app.state.db
 

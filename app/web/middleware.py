@@ -3,6 +3,7 @@ Web Middleware - Authentication and other middleware for FastAPI (v2.0)
 """
 
 import logging
+import uuid
 from typing import Optional
 from fastapi import Depends, Header, HTTPException, Request
 from fastapi.security.utils import get_authorization_scheme_param
@@ -10,6 +11,37 @@ from fastapi.security.utils import get_authorization_scheme_param
 from app.web.auth import decode_access_token, UserInfo
 
 logger = logging.getLogger(__name__)
+
+
+async def request_id_middleware(request: Request, call_next):
+    """
+    Middleware to add request ID to all requests for log tracing.
+
+    Generates a unique request ID and adds it to the request state.
+    The ID is then included in all log messages for that request.
+
+    Args:
+        request: Incoming FastAPI request
+        call_next: Next middleware/route to call
+
+    Returns:
+        Response with X-Request-ID header
+    """
+    # Generate or get request ID from header
+    request_id = request.headers.get("X-Request-ID")
+    if not request_id:
+        request_id = str(uuid.uuid4())
+
+    # Add to request state for access in routes
+    request.state.request_id = request_id
+
+    # Process request
+    response = await call_next(request)
+
+    # Add request ID to response headers
+    response.headers["X-Request-ID"] = request_id
+
+    return response
 
 
 async def get_bearer_token(authorization: str = Header(None)) -> Optional[str]:
@@ -29,18 +61,16 @@ async def get_bearer_token(authorization: str = Header(None)) -> Optional[str]:
     return None
 
 
-async def get_current_user(authorization: str = Header(None)) -> Optional[UserInfo]:
+def _get_user_from_token(token: Optional[str]) -> Optional[UserInfo]:
     """
-    Get current user from bearer token.
+    Get user info from JWT token string (internal helper).
 
     Args:
-        authorization: Authorization header value
+        token: JWT token string
 
     Returns:
         UserInfo if valid token, None otherwise
     """
-    token = await get_bearer_token(authorization)
-
     if not token:
         return None
 
@@ -54,6 +84,34 @@ async def get_current_user(authorization: str = Header(None)) -> Optional[UserIn
         username=payload.get("username", ""),
         is_superadmin=payload.get("is_superadmin", False)
     )
+
+
+async def get_current_user(
+    authorization: str = Header(None),
+    auth_token: str = Header(None, alias="X-Auth-Token")
+) -> Optional[UserInfo]:
+    """
+    Get current user from bearer token or X-Auth-Token header.
+
+    Supports both:
+    - Authorization: Bearer <token> header (for API calls)
+    - X-Auth-Token: <token> header (for browser navigation, set via cookie)
+
+    Args:
+        authorization: Authorization header value
+        auth_token: X-Auth-Token header value (from cookie)
+
+    Returns:
+        UserInfo if valid token, None otherwise
+    """
+    # Try Authorization header first (Bearer token)
+    token = await get_bearer_token(authorization)
+
+    # Fall back to X-Auth-Token header (for browser requests)
+    if not token and auth_token:
+        token = auth_token
+
+    return _get_user_from_token(token)
 
 
 async def get_current_user_required(authorization: str = Header(None)) -> UserInfo:
@@ -106,14 +164,30 @@ async def optional_auth(request: Request) -> Optional[UserInfo]:
 
     Returns user info if valid token provided, None otherwise.
 
+    Checks:
+    1. Authorization header (Bearer token)
+    2. auth_token cookie (for browser navigation)
+
     Args:
         request: FastAPI request object
 
     Returns:
         UserInfo if valid token, None otherwise
     """
+    # Try Authorization header first
     auth_header = request.headers.get("Authorization")
-    return await get_current_user(auth_header)
+    token = None
+
+    if auth_header:
+        scheme, token_candidate = get_authorization_scheme_param(auth_header)
+        if scheme.lower() == "bearer":
+            token = token_candidate
+
+    # Fall back to cookie
+    if not token:
+        token = request.cookies.get("auth_token")
+
+    return _get_user_from_token(token)
 
 
 # FastAPI dependency for required auth
@@ -122,6 +196,10 @@ async def required_auth(request: Request) -> UserInfo:
     Required authentication dependency.
 
     Returns user info if valid token provided, raises 401 otherwise.
+
+    Checks:
+    1. Authorization header (Bearer token)
+    2. auth_token cookie (for browser navigation)
 
     Args:
         request: FastAPI request object
@@ -136,8 +214,20 @@ async def required_auth(request: Request) -> UserInfo:
     if hasattr(request.state, 'user') and request.state.user:
         return request.state.user
 
+    # Try Authorization header first
     auth_header = request.headers.get("Authorization")
-    user = await get_current_user(auth_header)
+    token = None
+
+    if auth_header:
+        scheme, token_candidate = get_authorization_scheme_param(auth_header)
+        if scheme.lower() == "bearer":
+            token = token_candidate
+
+    # Fall back to cookie
+    if not token:
+        token = request.cookies.get("auth_token")
+
+    user = _get_user_from_token(token)
 
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or missing authentication token")
@@ -154,7 +244,7 @@ async def require_chat_membership(request: Request, chat_id: int) -> UserInfo:
 
     Args:
         request: FastAPI request object
-        chat_id: Chat ID to check membership for
+        chat_id: Telegram chat ID (will be converted to internal id)
 
     Returns:
         UserInfo if user has access
@@ -168,9 +258,18 @@ async def require_chat_membership(request: Request, chat_id: int) -> UserInfo:
     if user.is_superadmin:
         return user
 
-    # Check if user is a member of the chat
+    # Convert Telegram chat_id to internal id (chats.id)
     db = request.app.state.db
-    is_member = await db.is_chat_member(user.user_id, chat_id)
+    chat = await db.get_chat_by_id(chat_id)
+    if not chat:
+        raise HTTPException(
+            status_code=404,
+            detail="Chat not found"
+        )
+    internal_id = chat["id"]
+
+    # Check if user is a member of the chat using internal id
+    is_member = await db.is_chat_member(user.user_id, internal_id)
 
     if not is_member:
         raise HTTPException(
@@ -209,7 +308,7 @@ async def require_chat_role(
 
     Args:
         request: FastAPI request object
-        chat_id: Chat ID to check
+        chat_id: Telegram chat ID (will be converted to internal id)
         min_role: Minimum required role (member/admin/owner)
 
     Returns:
@@ -224,22 +323,50 @@ async def require_chat_role(
     if user.is_superadmin:
         return user
 
+    # Convert Telegram chat_id to internal id (chats.id)
     db = request.app.state.db
+    chat = await db.get_chat_by_id(chat_id)
+    if not chat:
+        raise HTTPException(
+            status_code=404,
+            detail="Chat not found"
+        )
+    internal_id = chat["id"]
 
-    # Check if user is a member first
-    is_member = await db.is_chat_member(user.user_id, chat_id)
+    # Check if user is a member first using internal id
+    is_member = await db.is_chat_member(user.user_id, internal_id)
     if not is_member:
         raise HTTPException(
             status_code=403,
             detail="You are not a member of this chat"
         )
 
-    # Get user's role in chat
-    cursor = await db._execute("""
-        SELECT role FROM chat_members
-        WHERE user_id = ? AND chat_id = ? AND left_at IS NULL
-    """, (user.user_id, chat_id))
-    result = await cursor.fetchone()
+    # Get user's telegram_id for role lookup
+    # Note: chat_members.user_id stores telegram_id, not internal users.id
+    # But for backward compatibility, if telegram_id is NULL, use user.user_id
+    async with db.get_connection() as conn:
+        cursor = await conn.execute(
+            """SELECT telegram_id FROM users WHERE id = ?""",
+            (user.user_id,)
+        )
+        user_row = await cursor.fetchone()
+        user_telegram_id = user_row[0] if user_row and user_row[0] else None
+
+        # Use telegram_id if available, otherwise fall back to user.user_id
+        # This handles both old users (where id = telegram_id) and new users (where telegram_id is set)
+        chat_member_user_id = user_telegram_id if user_telegram_id else user.user_id
+
+        # Get user's role in chat - check BOTH telegram_id AND user.id for backward compatibility
+        # This handles the case where a user has multiple records (legacy id=telegram_id vs new with telegram_id set)
+        cursor = await conn.execute(
+            """SELECT role FROM chat_members
+               WHERE user_id = ? AND chat_id = ? AND left_at IS NULL
+               UNION
+               SELECT role FROM chat_members
+               WHERE user_id = ? AND chat_id = ? AND left_at IS NULL""",
+            (chat_member_user_id, internal_id, user.user_id, internal_id)
+        )
+        result = await cursor.fetchone()
 
     user_role = result[0] if result and result[0] else UserRole.MEMBER
 
@@ -287,7 +414,7 @@ async def get_user_role_in_chat(request: Request, chat_id: int) -> str:
 
     Args:
         request: FastAPI request
-        chat_id: Chat ID
+        chat_id: Telegram chat ID (will be converted to internal id)
 
     Returns:
         User's role (member/admin/owner)
@@ -298,12 +425,33 @@ async def get_user_role_in_chat(request: Request, chat_id: int) -> str:
     if user.is_superadmin:
         return UserRole.OWNER
 
+    # Convert Telegram chat_id to internal id (chats.id)
     db = request.app.state.db
+    chat = await db.get_chat_by_id(chat_id)
+    if not chat:
+        return UserRole.MEMBER  # Chat doesn't exist, return default
 
-    cursor = await db._execute("""
-        SELECT role FROM chat_members
-        WHERE user_id = ? AND chat_id = ? AND left_at IS NULL
-    """, (user.user_id, chat_id))
-    result = await cursor.fetchone()
+    internal_id = chat["id"]
+
+    # Get user's role using proper connection method
+    # Note: chat_members.user_id stores telegram_id, need to get it first
+    async with db.get_connection() as conn:
+        # Get telegram_id (if exists) for lookup in chat_members
+        cursor = await conn.execute(
+            """SELECT telegram_id FROM users WHERE id = ?""",
+            (user.user_id,)
+        )
+        user_row = await cursor.fetchone()
+        user_telegram_id = user_row[0] if user_row and user_row[0] else None
+
+        # Use telegram_id if available, otherwise fall back to user.user_id
+        chat_member_user_id = user_telegram_id if user_telegram_id else user.user_id
+
+        cursor = await conn.execute(
+            """SELECT role FROM chat_members
+               WHERE user_id = ? AND chat_id = ? AND left_at IS NULL""",
+            (chat_member_user_id, internal_id)
+        )
+        result = await cursor.fetchone()
 
     return result[0] if result and result[0] else UserRole.MEMBER

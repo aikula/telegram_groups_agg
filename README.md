@@ -1,295 +1,252 @@
 # Telegram Chat Analytics & Coaching Bot
 
-**Версия:** 1.0  
-**Статус:** Ready for Development  
+> **AI-ассистент для анализа Telegram чатов** — отвечает на вопросы, создает сводки, дает рекомендации по коммуникации.
+
+[**🤖 Попробовать бота**](https://t.me/WhyVasyabot) • [**🌐 Веб-интерфейс**](https://tghub.kulinich.ru/)
 
 ---
 
-## 📌 О проекте
+## 🎯 Что умеет бот
 
-Корпоративный Telegram бот с FastAPI веб-интерфейсом для аналитики чатов:
+| Возможность | Описание |
+|-------------|----------|
+| **💬 Вопрос-ответ** | Упомяни бота в чате — он ответит на вопрос по содержанию обсуждения |
+| **📊 Сводки** | Ежедневные/еженедельные отчеты с главными темами и решениями |
+| **📈 Аналитика** | Статистика активности участников, графиков сообщений |
+| **🎓 Коучинг** | Рекомендации по улучшению коммуникации в команде |
+| **🔍 Поиск** | Найди конкретную информацию в истории чата |
+| **🌐 Web Dashboard** | Админ-панель с экспортом данных и статистикой |
 
-✅ Сохраняет историю сообщений в SQLite (с отслеживанием удаленных)  
-✅ Отвечает на вопросы через OpenRouter API (LLM)  
-✅ Публикует ежедневные сводки (16:00 МСК)  
-✅ Дает рекомендации коуча по коммуникации  
-✅ Веб-дашборд с статистикой и экспортом  
+**Как это работает:**
+```
+@bot что решали вчера?
+@bot покажи статистику за неделю
+@bot summarize last 3 days
+```
+
+---
+
+## 🏗️ Архитектура
+
+```
+┌─────────────┐      ┌─────────────┐      ┌─────────────┐
+│  Telegram   │─────▶│   Router    │─────▶│   Skills    │
+│     Bot     │      │   Agent     │      │  (QA/Summ/) │
+└─────────────┘      └─────────────┘      └─────────────┘
+       │                     │                     │
+       ▼                     ▼                     ▼
+┌─────────────┐      ┌─────────────┐      ┌─────────────┐
+│   Handlers  │      │    Tools    │      │     LLM     │
+│  (aiogram)  │      │  (DB/Logs/) │      │  (OpenAI)   │
+└─────────────┘      └─────────────┘      └─────────────┘
+```
+
+**Технологии:**
+- **aiogram 3.4+** — Telegram Bot API
+- **FastAPI** — веб-интерфейс с JWT авторизацией
+- **SQLite + aiosqlite** — асинхронная БД
+- **OpenAI-compatible API** — LLM интеграция
+- **Docker + Traefik** — деплой
 
 ---
 
 ## 🚀 Быстрый старт
 
-### 1. Подготовка
+### Требования
+- Docker и Docker Compose
+- Токен бота от [@BotFather](https://t.me/BotFather)
+- API ключ для LLM (OpenRouter / OpenAI / совместимый)
+
+### Установка
+
 ```bash
-# Клонировать проект
+# 1. Клонировать репозиторий
 git clone <repo>
-cd telegram-bot-project
+cd <project>
 
-# Создать Docker сеть (если используется Traefik или несколько контейнеров)
-docker network create telegram_chanel_agg_bot-network
-
-# Создать .env файл
+# 2. Создать .env файл
 cp .env.example .env
 
-# Заполнить переменные в .env:
-# - TELEGRAM_BOT_TOKEN (получить у @BotFather в Telegram)
-# - OPENROUTER_API_KEY (получить на openrouter.io)
-# - ADMIN_PASSWORD (придумать свой пароль)
-```
+# 3. Заполнить обязательные переменные в .env:
+#    TELEGRAM_BOT_TOKEN=your_token_here
+#    LLM_API_KEY=your_llm_key_here
+#    ENCRYPTION_MASTER_KEY=generated_with_python_c_secrets
+#    JWT_SECRET_KEY=generated_with_secrets
 
-### 2. Запуск
-```bash
-# Запустить Docker Compose
+# 4. Сгенерировать секреты (примеры в .env.example)
+
+# 5. Запустить
 docker-compose up -d
 
-# Проверить логи
-docker-compose logs -f telegram-bot
-
-# Открыть веб-интерфейс
-# http://localhost:8000
-# Логин: admin
-# Пароль: из переменной ADMIN_PASSWORD
+# 6. Проверить логи
+docker-compose logs -f
 ```
 
-### 3. Добавить бота в Telegram
-- Открыть чат в Telegram
-- Добавить бота (@your_bot_name) в группу
-- Выдать ему права администратора
-- Бот начнет автоматически сохранять сообщения
+### Настройка бота
+
+1. **Добавить в Telegram чат** — пригласи бота в группу
+2. **Выдать права админа** — бот должен читать сообщения
+3. **Готово** — бот автоматически сохраняет сообщения
 
 ---
 
 ## 📚 Документация
 
-- **TECHNICAL_SPECIFICATION.md** — полное ТЗ с требованиями
-- **AGENTS.md** — инструкция для кодового агента
-- **PROJECT_STRUCTURE.md** — архитектура и файлы проекта
+| Документ | Описание |
+|----------|----------|
+| [AGENTS.md](AGENTS.md) | Архитектура agentic системы |
+| [DOCS/TECHNICAL_SPEC.md](DOCS/TECHNICAL_SPEC.md) | Техническая спецификация |
+| [DOCS/DATABASE_SCHEMA.md](DOCS/DATABASE_SCHEMA.md) | Схема базы данных |
+| [DOCS/SECURITY_GUIDE.md](DOCS/SECURITY_GUIDE.md) | Руководство по безопасности |
 
 ---
 
-## 🔧 Структура проекта
+## 🔧 Конфигурация
 
+### Основные переменные (.env)
+
+```bash
+# Telegram
+TELEGRAM_BOT_TOKEN=your_token        # Токен от @BotFather
+TELEGRAM_BOT_USERNAME=bot_name       # Имя бота (без @)
+
+# LLM (OpenAI-compatible API)
+LLM_API_KEY=your_key                 # OpenRouter / OpenAI / etc.
+LLM_MODEL_NAME=anthropic/claude-3.5-sonnet
+LLM_BASE_URL=https://openrouter.ai/api/v1
+
+# Безопасность
+ENCRYPTION_MASTER_KEY=base64_key     # AES-256 шифрование
+JWT_SECRET_KEY=secret_key            # JWT токены
+
+# Админка
+SUPERADMIN_USERNAME=admin
+SUPERADMIN_PASSWORD_HASH=$2b$12$hash # bcrypt hash
 ```
-telegram-bot-project/
-├── app/
-│   ├── main.py              # Точка входа
-│   ├── config.py            # Конфигурация
-│   ├── database.py          # SQLite операции
-│   ├── bot/                 # Telegram бот
-│   ├── llm/                 # LLM интеграция
-│   └── web/                 # FastAPI сервер
-├── tests/                   # Тесты
-├── data/                    # SQLite БД (git ignore)
-├── Dockerfile               # Docker конфиг
-├── docker-compose.yml       # Docker Compose
-├── requirements.txt         # Python зависимости
-└── .env                     # Переменные окружения (git ignore)
+
+### Опциональные настройки
+
+```bash
+# База данных
+DATABASE_URL=sqlite+aiosqlite:///./data/chat_data.db
+
+# Функции
+RETENTION_DAYS=90                    # Хранение сообщений
+SUMMARY_TIME_UTC=13:00               # Время сводки
+DEFAULT_LANGUAGE=ru                  # ru / en
+CONTEXT_MESSAGES=20                  # Контекст для QA
+
+# Сервер
+HOST=0.0.0.0
+PORT=8000
+BASE_URL=https://yourdomain.com
 ```
-
----
-
-## 🔑 Ключевые возможности
-
-### 1. Сохранение сообщений
-- Бот автоматически сохраняет все сообщения в SQLite
-- Отслеживает удаленные сообщения
-- Сохраняет: текст, пользователя, время, чат
-
-### 2. QA через упоминание
-```
-@bot вопрос в чате
-```
-Бот захватит контекст (последние 10 сообщений) и ответит через LLM
-
-### 3. Ежедневная сводка (16:00 МСК)
-Для каждого чата публикует:
-- **Сводка** — главные темы, решения, активные участники
-- **Рекомендации коуча** — анализ тона, активности, конструктивизма
-
-### 4. Веб-интерфейс
-- 📊 График активности с фильтрами по чатам и пользователям
-- 📥 Экспорт данных в CSV
-- 🔐 Авторизация (логин/пароль)
-- 📈 Статистика по чатам
 
 ---
 
 ## 🌐 API Endpoints
 
 | Метод | Endpoint | Описание |
-|-------|----------|---------|
-| POST | `/api/auth/login` | Авторизация |
-| GET | `/api/stats/messages` | Статистика сообщений |
-| GET | `/api/chats` | Список активных чатов |
-| GET | `/api/export/csv` | Экспорт в CSV |
-| POST | `/api/summary/manual?chat_id=X` | Ручная сводка |
-| POST | `/api/recommendations/manual?chat_id=X` | Ручные рекомендации |
+|-------|----------|----------|
+| `GET` | `/api/health` | Проверка здоровья |
+| `POST` | `/api/auth/login` | Вход в админку |
+| `GET` | `/api/chats` | Список чатов |
+| `GET` | `/api/messages` | Сообщения чата |
+| `GET` | `/api/stats` | Статистика |
+| `GET` | `/api/export/csv` | Экспорт в CSV |
+| `POST` | `/api/summary/manual` | Ручная сводка |
 
 ---
 
-## 📖 Использованные технологии
+## 🛠️ Разработка
 
-- **Python 3.10+** — язык
-- **python-telegram-bot** — Telegram API
-- **FastAPI** — веб-фреймворк
-- **SQLite** — база данных
-- **OpenAI** — интеграция с OpenRouter
-- **APScheduler** — расписание задач
-- **Docker** — контейнеризация
+### Установка локально
 
----
+```bash
+# Создать виртуальное окружение
+python -m venv venv
+source venv/bin/activate
 
-## 🛠️ Переменные окружения
+# Установить зависимости
+pip install -r requirements.txt
 
-```env
-TELEGRAM_BOT_TOKEN=your_token        # Токен Telegram бота
-OPENROUTER_API_KEY=your_key          # API ключ OpenRouter
-ADMIN_USERNAME=admin                 # Логин в веб-интерфейсе
-ADMIN_PASSWORD=password              # Пароль в веб-интерфейсе
-TIMEZONE=Europe/Moscow               # Временная зона
-CONTEXT_MESSAGES=10                  # Сообщений контекста для QA
-SUMMARY_TIME=16:00                   # Время отправки сводки
-SUMMARY_DAYS=7                       # Дней для анализа сводки
+# Запустить
+python -m app.main
 ```
 
----
+### Структура проекта
 
-## 📝 Примеры использования
-
-### Получить статистику сообщений
-```bash
-curl -H "Authorization: Bearer token" \
-  "http://localhost:8000/api/stats/messages?chat_id=123"
 ```
-
-### Экспортировать данные
-```bash
-curl -H "Authorization: Bearer token" \
-  "http://localhost:8000/api/export/csv" > messages.csv
-```
-
-### Запросить ручную сводку
-```bash
-curl -X POST -H "Authorization: Bearer token" \
-  "http://localhost:8000/api/summary/manual?chat_id=123"
-```
-
----
-
-## 🐛 Troubleshooting
-
-### Бот не отвечает на упоминания
-- Проверь, что бот добавлен в чат с правами админа
-- Убедись, что TELEGRAM_BOT_TOKEN корректный
-- Проверь логи: `docker-compose logs telegram-bot`
-
-### Ошибка подключения к OpenRouter
-- Проверь OPENROUTER_API_KEY в .env
-- Убедись, что у тебя есть баланс в OpenRouter
-- Проверь интернет соединение
-
-### Веб-интерфейс недоступен
-- Убедись, что порт 8000 не занят
-- Проверь логи: `docker-compose logs telegram-bot`
-- Попробуй перезапустить контейнер: `docker-compose restart`
-
-### Ошибка авторизации
-- Убедись, что ADMIN_PASSWORD установлен в .env
-- Логин: `admin`, Пароль: значение из ADMIN_PASSWORD
-- Проверь, что .env файл загружен в контейнер
-
----
-
-## 🚀 Развертывание на сервере
-
-### Linux VPS (через Docker)
-```bash
-# 1. Клонировать проект
-git clone <repo>
-cd telegram-bot-project
-
-# 2. Создать Docker сеть (если ещё не создана)
-docker network create telegram_chanel_agg_bot-network
-
-# 3. Создать .env
-cp .env.example .env
-# Заполнить значения
-
-# 4. Запустить
-docker-compose up -d
-
-# 4. Проверить статус
-docker-compose ps
-docker-compose logs -f
-```
-
-### Остановка и обновление
-```bash
-# Остановить
-docker-compose down
-
-# Обновить код
-git pull
-
-# Перезапустить
-docker-compose up -d
-```
-
----
-
-## 📊 Мониторинг
-
-### Проверить работу бота
-```bash
-# Логи в реал-тайм
-docker-compose logs -f telegram-bot
-
-# Проверить контейнер
-docker-compose ps
-
-# Размер БД
-du -sh data/messages.db
-```
-
-### Резервная копия БД
-```bash
-# Скопировать БД
-cp data/messages.db data/messages_backup_$(date +%Y%m%d).db
-
-# Или экспортировать в CSV через веб-интерфейс
+app/
+├── main.py              # Точка входа
+├── config.py            # Pydantic настройки
+├── core/                # Ядро системы
+│   ├── agent.py         # Skill executor
+│   ├── router.py        # Router agent
+│   ├── tools.py         # Tool definitions
+│   ├── db.py            # Database operations
+│   └── llm.py           # LLM client
+├── skills/              # AI Skills
+│   ├── qa.py            # Question answering
+│   ├── summary.py       # Chat summaries
+│   ├── analytics.py     # Statistics
+│   ├── coach.py         # Communication coaching
+│   └── about.py         # Bot information
+├── bot/                 # Telegram bot (aiogram)
+│   ├── bot.py           # Bot initialization
+│   ├── handlers.py      # Message handlers
+│   └── scheduler.py     # Scheduled tasks
+└── web/                 # FastAPI interface
+    ├── app.py           # FastAPI app
+    ├── auth.py          # JWT authentication
+    └── routes/          # API routes
 ```
 
 ---
 
 ## 🔐 Безопасность
 
-✅ Пароли хешируются через bcrypt  
-✅ API требует авторизацию  
-✅ .env файл в git ignore  
-✅ SQLite БД локальная (не в облаке)  
+- ✅ AES-256 шифрование чувствительных данных
+- ✅ bcrypt хеширование паролей
+- ✅ JWT токены с истечением срока
+- ✅ Rate limiting для API
+- ✅ .env в .gitignore
+- ✅ Логи с санитизацией секретов
 
-**⚠️ Для production:**
-- Использовать https для веб-интерфейса
-- Раскрыть только необходимые порты
-- Регулярно создавать резервные копии БД
-- Настроить логирование и мониторинг
-
----
-
-## 📞 Поддержка
-
-При проблемах:
-1. Проверь логи контейнера
-2. Убедись что все переменные окружения установлены
-3. Проверь права доступа боту в Telegram
-4. Перезапусти контейнер: `docker-compose restart`
+**Для продакшена:**
+- Используй HTTPS
+- Регулярно бэкапь БД
+- Ограничь экспозицию портов
+- Мониторь логи
 
 ---
 
-## 📄 Лицензия
+## 🐛 Troubleshooting
 
-Проект создан для внутреннего использования.
+| Проблема | Решение |
+|----------|---------|
+| Бот не отвечает | Проверь токен и права админа в чате |
+| Ошибка LLM | Проверь API ключ и баланс |
+| Веб недоступен | Проверь порт и firewall |
+| Ошибка авторизации | Проверь JWT_SECRET_KEY |
+
+```bash
+# Логи
+docker-compose logs -f
+
+# Перезапуск
+docker-compose restart
+
+# Статус
+docker-compose ps
+```
 
 ---
 
-**Готово к использованию! 🎉**
+## 📝 Лицензия
+
+Open source — MIT License
+
+---
+
+**Попробуй бота:** [@WhyVasyabot](https://t.me/WhyVasyabot) • **Web:** [tghub.kulinich.ru](https://tghub.kulinich.ru/)

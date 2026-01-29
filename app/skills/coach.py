@@ -62,7 +62,7 @@ class CoachSkill(BaseSkill):
     ):
         super().__init__(db, llm, config or CoachSkillConfig())
 
-    def get_system_prompt(self, context: Dict[str, Any]) -> str:
+    def _get_default_prompt(self, context: Dict[str, Any]) -> str:
         """Get coach system prompt."""
         language = self.config.language
         if language == "ru":
@@ -80,35 +80,45 @@ class CoachSkill(BaseSkill):
 
         return f"""{base_prompt}
 
-Task: Analyze communication patterns and provide recommendations.
+## ВАЖНЫЕ ПРАВИЛА ОТВЕТА:
 
-Tools available:
-- get_chat_history(days) - Retrieve messages to analyze
+1. **Будь конкретным и кратким**
+   - 2-4 предложения на каждую секцию
+   - Избегай вступлений
 
-Output format:
-✅ Positive observations
-⚠️ Areas to improve
-💡 Recommendations (3-5 specific items)
+2. **Используй естественный русский**
+   - Разговорный стиль
+   - Без канцелярщины
 
-Analysis guidelines:
-- Be constructive and specific
-- Cite actual message examples when relevant
-- Focus on actionable recommendations
-- Consider team dynamics and individual contributions
-- Highlight both strengths and areas for growth
+Задача: Проанализируй коммуникацию и дай рекомендации.
 
-Current context:
-- Chat: {context.get('chat_title', 'N/A')}
+Доступные инструменты:
+- get_chat_history(days) - Получить сообщения для анализа
+
+Формат вывода:
+✅ Позитивные наблюдения
+⚠️ Зоны для улучшения
+💡 Рекомендации (3-5 конкретных пунктов)
+
+Рекомендации по анализу:
+- Будь конструктивным и специфичным
+- Приводи реальные примеры сообщений
+- Фокусируйся на конкретных рекомендациях
+- Учитывай динамику команды и вклад участников
+- Отмечай как сильные стороны, так и зоны роста
+
+Текущий контекст:
+- Чат: {context.get('chat_title', 'N/A')}
 - Chat ID: {context['chat_id']}
-- Date: {context.get('date', 'N/A')}
+- Дата: {context.get('date', 'N/A')}
 
-When analyzing:
-1. Use get_chat_history() to retrieve recent messages
-2. Look for patterns in communication style
-3. Identify tone, constructiveness, clarity
-4. Note positive behaviors to reinforce
-5. Suggest specific improvements
-6. Provide 3-5 actionable recommendations"""
+При анализе:
+1. Используй get_chat_history() для получения сообщений
+2. Ищи паттерны в стиле коммуникации
+3. Определяй тон, конструктивность, ясность
+4. Отмечай позитивное поведение для закрепления
+5. Предлагай конкретные улучшения
+6. Дай 3-5 конкретных рекомендаций"""
 
     async def format_output(self, text: str) -> str:
         """Format coach output."""

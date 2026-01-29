@@ -1,5 +1,5 @@
 """
-Router Agent - Classify user queries and select appropriate skill (v2.1)
+Router Agent - Classify user queries and select appropriate skill (v2.2)
 
 Implements AGENTS.md specification for intelligent skill routing.
 The Router uses LLM to understand user intent and choose the best skill.
@@ -9,6 +9,7 @@ Available skills:
 - coach: Communication analysis and recommendations
 - qa: Answer questions about chat content
 - analytics: Statistics, data queries, and metrics
+- about: Information about bot capabilities and origin
 """
 
 import logging
@@ -21,13 +22,27 @@ logger = logging.getLogger(__name__)
 
 
 # Available skills (must match classes in skills module)
-# Available skills (must match classes in skills module)
-AVAILABLE_SKILLS = ["summary", "coach", "qa", "analytics"]
+AVAILABLE_SKILLS = ["summary", "coach", "qa", "analytics", "about"]
+
+# Triggers for "about" skill (bypass LLM for direct routing)
+ABOUT_TRIGGERS = [
+    "что ты умеешь", "что умеешь", "твои возможности",
+    "кто тебя создал", "кто создал", "кто разработал",
+    "расскажи о себе", "представься", "представьcя",
+    "что ты за бот", "что за бот", "ты кто",
+    "что ты можешь", "ты умеешь"
+]
 
 # Input validation constants (v2.2)
 MAX_QUERY_LENGTH = 500  # Maximum query length in characters
-MIN_CHAT_ID = 1         # Minimum valid chat_id
-MAX_CHAT_ID = 2**31 - 1 # Maximum valid chat_id (Telegram limit)
+
+# Telegram chat_id ranges:
+# - Personal chats: positive ID (e.g., 78792751)
+# - Groups/supergroups: negative ID (e.g., -1001234567890)
+# Telegram uses 64-bit signed integers for some chat IDs
+MIN_POSITIVE_CHAT_ID = 1
+MIN_NEGATIVE_CHAT_ID = -2**63  # Most negative signed 64-bit int
+MAX_CHAT_ID = 2**63 - 1
 
 
 class RouterAgent:
@@ -91,12 +106,28 @@ class RouterAgent:
             )
             query = query[:MAX_QUERY_LENGTH].strip()
 
-        # Validate chat_id
+        # Validate chat_id (Telegram allows negative IDs for groups/supergroups)
         if not isinstance(chat_id, int):
             raise ValueError(f"chat_id must be int, got {type(chat_id).__name__}")
 
-        if not (MIN_CHAT_ID <= chat_id <= MAX_CHAT_ID):
+        # Check if chat_id is within valid Telegram range
+        # Positive: personal chats, Negative: groups/supergroups
+        is_valid_positive = MIN_POSITIVE_CHAT_ID <= chat_id <= MAX_CHAT_ID
+        is_valid_negative = MIN_NEGATIVE_CHAT_ID <= chat_id < 0
+
+        if not (is_valid_positive or is_valid_negative):
             raise ValueError(f"chat_id out of valid range: {chat_id}")
+
+        # Check for "about" triggers first (bypass LLM for direct routing)
+        query_lower = query.lower()
+        for trigger in ABOUT_TRIGGERS:
+            if trigger in query_lower:
+                logger.info(f"Router: matched 'about' trigger -> about (chat_id={chat_id})")
+                # Check if about skill is enabled
+                enabled_skills = await self._get_enabled_skills(chat_id)
+                if "about" in enabled_skills:
+                    return "about"
+                # If about not enabled, fall through to normal routing
 
         # Get enabled skills for chat
         enabled_skills = await self._get_enabled_skills(chat_id)
@@ -264,7 +295,8 @@ def _get_skill_description(skill: str) -> str:
         "summary": "Create chat summaries, daily/weekly reports, recap discussions",
         "coach": "Analyze communication patterns, provide team recommendations",
         "qa": "Answer questions about chat content, find specific information",
-        "analytics": "Statistics, message counts, user activity, data queries"
+        "analytics": "Statistics, message counts, user activity, data queries",
+        "about": "Answer questions about bot capabilities and origin (what can you do, who created you)"
     }
     return descriptions.get(skill, "General assistance")
 

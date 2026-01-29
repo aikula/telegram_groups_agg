@@ -1,5 +1,5 @@
 """
-Skills module - AI-powered skills for chat analysis (v2.1)
+Skills module - AI-powered skills for chat analysis (v2.2)
 
 Implements AGENTS.md specification with tool calling support.
 
@@ -9,6 +9,7 @@ Available skills:
 - QA: Question answering based on chat context
 - Analytics: Statistics, data queries, and counts
 - ThreadSummary: Thread/conversation summarization
+- About: Information about bot capabilities and origin
 """
 
 from app.skills.base import (
@@ -26,6 +27,7 @@ from app.skills.coach import CoachSkill, generate_coach_insights
 from app.skills.thread_summary import ThreadSummarySkill, generate_thread_summary
 from app.skills.qa import QASkill, generate_qa_answer
 from app.skills.analytics import AnalyticsSkill, generate_analytics
+from app.skills.about import AboutSkill
 
 # Skills registry - maps skill names to classes
 _SKILL_REGISTRY = {
@@ -34,6 +36,7 @@ _SKILL_REGISTRY = {
     "qa": QASkill,
     "analytics": AnalyticsSkill,
     "thread_summary": ThreadSummarySkill,
+    "about": AboutSkill,
 }
 
 
@@ -117,6 +120,7 @@ __all__ = [
     "QASkill",
     "AnalyticsSkill",
     "ThreadSummarySkill",
+    "AboutSkill",
 
     # Legacy functions
     "generate_summary",

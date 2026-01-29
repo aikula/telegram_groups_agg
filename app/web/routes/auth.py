@@ -8,7 +8,8 @@ Supports:
 """
 
 import logging
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.web.auth import (
@@ -42,7 +43,7 @@ class MeResponse(BaseModel):
 
 
 @router.post("/telegram", response_model=TokenResponse)
-async def login_telegram(request: Request, auth_data: TelegramAuthRequest):
+async def login_telegram(request: Request, response: Response, auth_data: TelegramAuthRequest):
     """
     Authenticate via Telegram OAuth Login Widget.
 
@@ -59,6 +60,9 @@ async def login_telegram(request: Request, auth_data: TelegramAuthRequest):
 
     Returns:
         Access token and expiration time
+
+    Sets cookie:
+        - auth_token: JWT token for browser navigation
     """
     auth_manager = request.app.state.auth_manager
 
@@ -83,11 +87,22 @@ async def login_telegram(request: Request, auth_data: TelegramAuthRequest):
 
     logger.info(f"Successful Telegram auth for user_id: {auth_data.id}")
 
+    # Set cookie for browser navigation (httpOnly for security)
+    from app.config import settings
+    response.set_cookie(
+        key="auth_token",
+        value=result.access_token,
+        max_age=settings.jwt_expire_minutes * 60,
+        path="/",
+        httponly=True,
+        samesite="lax"
+    )
+
     return result
 
 
 @router.post("/superadmin", response_model=TokenResponse)
-async def login_superadmin(request: Request, credentials: SuperadminLoginRequest):
+async def login_superadmin(request: Request, response: Response, credentials: SuperadminLoginRequest):
     """
     Authenticate as superadmin using username and password.
 
@@ -99,6 +114,9 @@ async def login_superadmin(request: Request, credentials: SuperadminLoginRequest
 
     Returns:
         Access token and expiration time
+
+    Sets cookie:
+        - auth_token: JWT token for browser navigation
     """
     auth_manager = request.app.state.auth_manager
 
@@ -111,6 +129,17 @@ async def login_superadmin(request: Request, credentials: SuperadminLoginRequest
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
     logger.info(f"Successful superadmin login for user: {credentials.username}")
+
+    # Set cookie for browser navigation (httpOnly for security)
+    from app.config import settings
+    response.set_cookie(
+        key="auth_token",
+        value=result.access_token,
+        max_age=settings.jwt_expire_minutes * 60,
+        path="/",
+        httponly=True,
+        samesite="lax"
+    )
 
     return result
 
@@ -172,17 +201,17 @@ async def get_current_user(request: Request):
 
 
 @router.post("/logout")
-async def logout():
+async def logout(response: Response):
     """
     Logout endpoint.
 
-    Note: JWT tokens are stateless, so logout is handled client-side
-    by discarding the token. This endpoint exists for API completeness
-    and potential future token blacklisting.
+    Clears the auth cookie. JWT tokens are stateless, so client-side
+    token discarding is also recommended.
 
     Returns:
         Success message
     """
+    response.delete_cookie(key="auth_token", path="/")
     return {"message": "Logged out successfully"}
 
 

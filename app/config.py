@@ -46,7 +46,7 @@ class Settings(BaseSettings):
         description="Secret key for JWT tokens. Generate with: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
     )
     jwt_algorithm: str = Field(default="HS256")
-    jwt_expire_minutes: int = Field(default=10080, ge=1, description="Token expiration in minutes (default: 7 days)")
+    jwt_expire_minutes: int = Field(default=60, ge=15, le=1440, description="Token expiration in minutes (default: 1 hour, min: 15min, max: 24hr)")
     superadmin_password_hash: Optional[str] = Field(
         None,
         description="Bcrypt hash of superadmin password. "

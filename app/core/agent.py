@@ -83,7 +83,7 @@ class SkillAgent:
         context = await self._prepare_context(query, chat_id, user_id)
 
         # Build messages
-        system_prompt = skill.get_system_prompt(context)
+        system_prompt = await skill.get_system_prompt(context)
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": query}

@@ -60,7 +60,7 @@ class ThreadSummarySkill(BaseSkill):
     ):
         super().__init__(db, llm, config or ThreadSummarySkillConfig())
 
-    def get_system_prompt(self, context: Dict[str, Any]) -> str:
+    def _get_default_prompt(self, context: Dict[str, Any]) -> str:
         """Get thread summary system prompt."""
         return f"""You are a conversation summarization expert.
 

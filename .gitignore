@@ -48,6 +48,25 @@ venv.bak/
 .DS_Store
 data/messages.db
 data/*.db
+data/*.db-shm
+data/*.db-wal
+data/*.sqlite
+data/*.sqlite3
 *.log
 logs/
 .cache/
+# Security - never commit these
+*.key
+*.pem
+*.cert
+*.crt
+secrets/
+credentials/
+*.secret
+.secrets
+# IDE - local settings
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

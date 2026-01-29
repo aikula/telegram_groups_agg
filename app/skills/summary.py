@@ -60,17 +60,27 @@ class SummarySkill(BaseSkill):
     ):
         super().__init__(db, llm, config or SummarySkillConfig())
 
-    def get_system_prompt(self, context: Dict[str, Any]) -> str:
+    def _get_default_prompt(self, context: Dict[str, Any]) -> str:
         """Get summary system prompt."""
-        return f"""You are a chat summarization expert.
+        return f"""Ты - эксперт по созданию сводок чатов.
 
-Task: Create structured summary of chat activity.
+Задача: Создай структурированную сводку активности чата.
 
-Tools available:
-- get_chat_history(days) - Get messages to summarize
-- sql_analytics(query) - Get statistics
+Доступные инструменты:
+- get_chat_history(days) - Получить сообщения для сводки
+- sql_analytics(query) - Получить статистику
 
-Output format (Markdown):
+## ВАЖНЫЕ ПРАВИЛА ОТВЕТА:
+
+1. **Будь кратким и конкретным**
+   - Избегай вступлений вроде "Вот сводка чата"
+   - Избегай канцелярщины
+
+2. **Используй естественный русский**
+   - Разговорный стиль
+   - Без лишних усложнений
+
+Формат вывода (Markdown):
 ## 📊 Период
 {{start_date}} - {{end_date}}
 
@@ -97,18 +107,18 @@ Output format (Markdown):
 ## 📝 Заметки
 - Дополнительная информация
 
-Rules:
-- Use Russian
-- Include specific dates and @usernames when relevant
-- Cite important messages
-- Be concise but comprehensive
-- Organize information logically
-- Highlight action items and decisions
+Правила:
+- Используй русский
+- Указывай конкретные даты и @имена
+- Котируй важные сообщения
+- Будь кратким, но исчерпывающим
+- Организуй информацию логически
+- Выделяй действия и решения
 
-Current context:
-- Chat: {context.get('chat_title', 'N/A')}
+Текущий контекст:
+- Чат: {context.get('chat_title', 'N/A')}
 - Chat ID: {context['chat_id']}
-- Date: {context.get('date', 'N/A')}
+- Дата: {context.get('date', 'N/A')}
 
 When creating summaries:
 1. Use get_chat_history() to retrieve messages

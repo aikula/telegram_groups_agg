@@ -7,11 +7,11 @@ Command and message handlers for the Telegram bot.
 import logging
 import asyncio
 from datetime import datetime, timedelta
-from typing import Optional, Set
+from typing import Optional
 
 from aiogram import Router, F, Bot
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, ChatMemberUpdated
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.config import settings
@@ -29,23 +29,7 @@ logger = logging.getLogger(__name__)
 command_router = Router()
 message_router = Router()
 callback_router = Router()
-
-
-# Track processed QA requests to prevent duplicates (message_id, timestamp)
-_processed_qa_requests: Set[tuple[int, int]] = set()
-_qa_cleanup_task: Optional[asyncio.Task] = None
-
-
-async def _cleanup_old_qa_requests():
-    """Remove old QA request tracking entries every minute."""
-    global _qa_cleanup_task
-    while True:
-        await asyncio.sleep(60)
-        current_time = int(datetime.now().timestamp())
-        # Remove entries older than 30 seconds
-        to_remove = {msg_id for msg_id, ts in _processed_qa_requests if current_time - ts > 30}
-        for msg_id in to_remove:
-            _processed_qa_requests.discard((msg_id, ts))  # Need both parts for exact match
+chat_member_router = Router()
 
 
 # ============================================================================
@@ -59,7 +43,7 @@ async def cmd_start(message: Message, db: Database) -> None:
 
     Shows welcome message with bot features.
     """
-    language = "ru"  # TODO: Get from user settings
+    language = settings.default_language
 
     text = get_text("bot.start", lang=language)
     await message.answer(text)
@@ -68,7 +52,7 @@ async def cmd_start(message: Message, db: Database) -> None:
 @command_router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
     """Handle /help command - show help message."""
-    language = "ru"  # TODO: Get from user settings
+    language = settings.default_language
 
     text = get_text("bot.help", lang=language)
     await message.answer(text)
@@ -81,7 +65,7 @@ async def cmd_stats(message: Message, db: Database) -> None:
 
     Shows message count, active members, messages today, and last activity.
     """
-    language = "ru"  # TODO: Get from user settings
+    language = settings.default_language
     chat_id = message.chat.id
 
     # Ensure chat exists in database first (fixes FOREIGN KEY constraint)
@@ -113,7 +97,7 @@ async def cmd_export(message: Message, db: Database) -> None:
 
     Sends a text file with all messages from the chat.
     """
-    language = "ru"  # TODO: Get from user settings
+    language = settings.default_language
     chat_id = message.chat.id
 
     # Ensure chat exists in database first (fixes FOREIGN KEY constraint)
@@ -159,7 +143,7 @@ async def cmd_settings(message: Message, db: Database) -> None:
 
     Shows inline keyboard for managing chat settings.
     """
-    language = "ru"  # TODO: Get from user settings
+    language = settings.default_language
     chat_id = message.chat.id
 
     # Ensure chat exists in database first (fixes FOREIGN KEY constraint)
@@ -207,43 +191,33 @@ async def cmd_settings(message: Message, db: Database) -> None:
 @command_router.message(Command("login"))
 async def cmd_login(message: Message, db: Database) -> None:
     """
-    Handle /login command - generate OTP for web authentication.
+    Handle /login command - show Telegram ID and link to web interface.
 
-    Sends a 6-digit one-time code valid for 5 minutes.
-    User enters this code on the website to authenticate.
+    Sends:
+    1. User's Telegram ID
+    2. Link to web interface
+
+    OTP code will be generated when user requests it via web interface.
     """
     from app.config import settings
 
-    # Get or create user
-    user = await db.get_or_create_user(
-        user_id=message.from_user.id,
-        username=message.from_user.username,
-        first_name=message.from_user.first_name,
-        last_name=message.from_user.last_name
-    )
-
-    # Generate OTP
-    code = await db.create_otp(
-        user_id=user['id'],
-        telegram_id=message.from_user.id,
-        valid_minutes=5
-    )
-
     # Get site URL
     site_url = getattr(settings, 'base_url', 'https://tghub.kulinich.ru')
+    login_url = f"{site_url}/login"
 
-    text = f"""🔐 <b>Код для входа на сайт</b>
+    text = f"""🔐 <b>Вход в веб-интерфейс</b>
 
-Ваш код: <code>{code}</code>
+👤 <b>Ваш Telegram ID:</b> <code>{message.from_user.id}</code>
 
-⏱ Код действителен 5 минут
+🌐 <a href="{login_url}">Открыть страницу входа</a>
 
-🌐 Перейдите на сайт и введите этот код:
-{site_url}/login
+<b>Инструкция:</b>
+1. Откройте ссылку выше
+2. Введите ваш Telegram ID
+3. Нажмите "Получить код"
+4. Мы отправим код сюда в Telegram"""
 
-⚠️ <i>Никому не передавайте этот код!</i>"""
-
-    await message.answer(text, parse_mode="HTML")
+    await message.answer(text, parse_mode="HTML", disable_web_page_preview=False)
 
 
 @command_router.message(Command("diagnostics"))
@@ -344,7 +318,7 @@ async def cmd_summarize_thread(message: Message, db: Database) -> None:
 
     Works in groups when replying to a message to summarize that thread.
     """
-    language = "ru"  # TODO: Get from user settings
+    language = settings.default_language
     chat_id = message.chat.id
 
     # Ensure chat exists in database first (fixes FOREIGN KEY constraint)
@@ -416,7 +390,7 @@ async def cmd_ask(message: Message, db: Database) -> None:
 
     Usage: /ask What was discussed today?
     """
-    language = "ru"  # TODO: Get from user settings
+    language = settings.default_language
     chat_id = message.chat.id
 
     # Ensure chat exists in database first (fixes FOREIGN KEY constraint)
@@ -502,15 +476,20 @@ async def handle_message(message: Message, db: Database, bot: Bot) -> None:
         last_name=message.from_user.last_name or "",
     )
 
-    # Get or create chat
+    # Get or create chat (passing creator so they become owner for new chats)
     chat = await db.get_or_create_chat(
         chat_id=chat_id,
         title=message.chat.title or message.chat.first_name or "Private Chat",
-        chat_type=message.chat.type
+        chat_type=message.chat.type,
+        creator_user_id=user_id  # Add creator as owner for new chats
     )
 
-    # Add user as chat member
-    await db.add_chat_member(chat["id"], user["id"])
+    # Add user as chat member (only if not already the owner)
+    # get_or_create_chat now adds creator as owner for new chats
+    # Check if user is already a member to avoid duplicates
+    existing_member = await db.is_chat_member(user["id"], chat["id"])
+    if not existing_member:
+        await db.add_chat_member(chat["id"], user["id"])
 
     # Save message
     content = message.text or message.caption or ""
@@ -540,18 +519,7 @@ async def handle_message(message: Message, db: Database, bot: Bot) -> None:
                 question = message.text.replace(mention, "").strip()
 
                 if question:
-                    # Check if we already processed this QA request (prevent duplicates)
-                    current_time = int(datetime.now().timestamp())
-                    request_key = (message.message_id, current_time)
-
-                    if request_key in _processed_qa_requests:
-                        logger.debug(f"Skipping duplicate QA request for message {message.message_id}")
-                        return
-
-                    # Mark as being processed
-                    _processed_qa_requests.add(request_key)
-
-                    language = "ru"  # TODO: Get from user settings
+                    language = settings.default_language
                     logger.info(f"🤖 Bot mention detected from user {user_id}: {question}")
 
                     # === NEW AGENTIC ARCHITECTURE (v2.1) ===
@@ -589,7 +557,7 @@ async def handle_message(message: Message, db: Database, bot: Bot) -> None:
 @callback_router.callback_query(F.data.startswith("settings_toggle_summary_"))
 async def cb_toggle_summary(callback: CallbackQuery, db: Database) -> None:
     """Toggle daily summary setting."""
-    language = "ru"
+    language = settings.default_language
     chat_id = int(callback.data.split("_")[-1])
 
     # Get current settings
@@ -626,7 +594,7 @@ async def cb_toggle_summary(callback: CallbackQuery, db: Database) -> None:
 @callback_router.callback_query(F.data.startswith("settings_toggle_coach_"))
 async def cb_toggle_coach(callback: CallbackQuery, db: Database) -> None:
     """Toggle coaching setting."""
-    language = "ru"
+    language = settings.default_language
     chat_id = int(callback.data.split("_")[-1])
 
     # Get current settings
@@ -663,7 +631,7 @@ async def cb_toggle_coach(callback: CallbackQuery, db: Database) -> None:
 @callback_router.callback_query(F.data.startswith("settings_language_"))
 async def cb_language(callback: CallbackQuery, db: Database) -> None:
     """Cycle through language options."""
-    language = "ru"
+    language = settings.default_language
     chat_id = int(callback.data.split("_")[-1])
 
     # Get current settings
@@ -698,9 +666,116 @@ async def cb_language(callback: CallbackQuery, db: Database) -> None:
     await callback.message.answer(f"Language changed to {new_value.upper()}")
 
 
+# ============================================================================
+# Chat Member Handlers
+# ============================================================================
+
+@chat_member_router.chat_member()
+async def handle_chat_member_update(event: ChatMemberUpdated, db: Database) -> None:
+    """
+    Handle chat member updates (users joining/leaving groups).
+
+    This updates the chat_members table when:
+    - User joins a group (member, administrator)
+    - User leaves a group (left, kicked)
+    - User is promoted/demoted (admin role changes)
+    """
+    from aiogram.enums import ChatMemberStatus
+
+    chat_id = event.chat.id
+    user_id = event.new_chat_member.user.id
+    new_status = event.new_chat_member.status
+    old_status = event.old_chat_member.status
+
+    # Skip private chats
+    if chat_id > 0:
+        return
+
+    # Get internal chat id (chats.id, not telegram chat_id)
+    chat = await db.get_chat_by_id(chat_id)
+    if not chat:
+        logger.warning(f"Chat {chat_id} not found in database for member update")
+        return
+
+    internal_chat_id = chat["id"]
+
+    # Check status transitions
+    if old_status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
+        # User is joining the group
+        if new_status == ChatMemberStatus.CREATOR:
+            role = "owner"  # Creator gets owner role
+        elif new_status == ChatMemberStatus.ADMINISTRATOR:
+            role = "admin"  # Administrator gets admin role
+        else:
+            role = "member"
+        await db.add_chat_member(internal_chat_id, user_id, role=role)
+        logger.info(f"User {user_id} joined chat {chat_id} as {role}")
+
+    elif new_status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
+        # User is leaving the group
+        await db.update_member_left_at(internal_chat_id, user_id)
+        logger.info(f"User {user_id} left chat {chat_id}")
+
+    elif new_status == ChatMemberStatus.CREATOR:
+        # User status changed to CREATOR (should be owner)
+        await db.update_member_role(internal_chat_id, user_id, "owner")
+        logger.info(f"User {user_id} is CREATOR in chat {chat_id}, set as owner")
+
+    elif new_status == ChatMemberStatus.ADMINISTRATOR:
+        # User was promoted to admin
+        await db.update_member_role(internal_chat_id, user_id, "admin")
+        logger.info(f"User {user_id} promoted to admin in chat {chat_id}")
+
+    elif new_status == ChatMemberStatus.MEMBER:
+        # User was demoted from admin/creator to regular member
+        await db.update_member_role(internal_chat_id, user_id, "member")
+        logger.info(f"User {user_id} demoted to member in chat {chat_id}")
+
+
+@chat_member_router.my_chat_member()
+async def handle_my_chat_member_update(event: ChatMemberUpdated, db: Database) -> None:
+    """
+    Handle bot's own chat member updates.
+
+    This tracks when the bot itself joins or leaves groups.
+    """
+    from aiogram.enums import ChatMemberStatus
+
+    chat_id = event.chat.id
+    new_status = event.new_chat_member.status
+
+    # Skip private chats
+    if chat_id > 0:
+        return
+
+    if new_status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
+        # Bot was added to a group
+        chat = await db.get_or_create_chat(
+            chat_id=chat_id,
+            title=event.chat.title or f"Group {chat_id}",
+            chat_type=event.chat.type
+        )
+        logger.info(f"Bot added to chat: {chat['title']} ({chat_id})")
+
+        # Add bot as member
+        bot_info = event.new_chat_member.user
+        await db.get_or_create_user(
+            user_id=bot_info.id,
+            username=bot_info.username,
+            first_name=bot_info.first_name
+        )
+        await db.add_chat_member(chat["id"], bot_info.id, role="member")
+
+    elif new_status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
+        # Bot was removed from a group
+        logger.info(f"Bot removed from chat: {chat_id}")
+        # Optionally mark chat as inactive
+
+
 # Export routers for registration
 __all__ = [
     "command_router",
     "message_router",
     "callback_router",
+    "chat_member_router",
 ]

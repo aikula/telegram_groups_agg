@@ -78,6 +78,11 @@ DEFAULT_LIMITS = {
     "auth_login": RateLimit(max_requests=5, window_seconds=300),  # 5 logins per 5 minutes
     "auth_register": RateLimit(max_requests=3, window_seconds=3600),  # 3 registrations per hour
     "settings_update": RateLimit(max_requests=10, window_seconds=60),  # 10 settings updates per minute
+
+    # LLM endpoint rate limits (v2.2 - Cost protection)
+    "llm_query": RateLimit(max_requests=10, window_seconds=60),  # 10 LLM queries per minute per user
+    "bot_send": RateLimit(max_requests=15, window_seconds=60),  # 15 bot sends per minute per user
+    "summary_generate": RateLimit(max_requests=5, window_seconds=60),  # 5 summaries per minute per user
 }
 
 

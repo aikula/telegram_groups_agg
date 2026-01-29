@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Вход - Telegram Chat Analytics</title>
     <link rel="stylesheet" href="/static/style.css">
-    <script src="https://telegram.org/js/telegram-widget.js?4"></script>
     <style>
         .login-container {
             min-height: 100vh;
@@ -98,6 +97,11 @@
             color: #3c3;
             border: 1px solid #cfc;
         }
+        .alert-info {
+            background: #eef6ff;
+            color: #0066cc;
+            border: 1px solid #b3d9ff;
+        }
         .loading {
             display: inline-block;
             width: 16px;
@@ -109,23 +113,6 @@
         }
         @keyframes spin {
             to { transform: rotate(360deg); }
-        }
-        details {
-            margin-top: 30px;
-        }
-        summary {
-            cursor: pointer;
-            color: #666;
-            font-size: 14px;
-            padding: 10px;
-            user-select: none;
-        }
-        summary:hover {
-            color: #333;
-        }
-        .telegram-widget-container {
-            margin: 30px 0;
-            text-align: center;
         }
         .divider {
             display: flex;
@@ -144,6 +131,27 @@
             color: #999;
             font-size: 14px;
         }
+        .otp-step {
+            display: none;
+        }
+        .otp-step.active {
+            display: block;
+        }
+        .step-indicator {
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            margin-bottom: 20px;
+        }
+        .step-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #e0e0e0;
+        }
+        .step-dot.active {
+            background: #667eea;
+        }
     </style>
 </head>
 <body>
@@ -158,92 +166,133 @@
             </div>
 
             <!-- Superadmin Login Form -->
-            <form id="loginForm">
-                <div id="alertContainer"></div>
+            <form id="superadminForm">
+                <div id="superadminAlertContainer"></div>
 
-                <div class="form-group">
-                    <label for="username" class="form-label">Логин</label>
-                    <input
-                        type="text"
-                        id="username"
-                        name="username"
-                        class="form-control"
-                        placeholder="Введите логин"
-                        autocomplete="username"
-                        required
-                    >
-                </div>
+                <details style="margin-bottom: 20px;">
+                    <summary style="cursor: pointer; color: #999; font-size: 13px; padding: 10px;">
+                        Вход для администратора
+                    </summary>
 
-                <div class="form-group">
-                    <label for="password" class="form-label">Пароль</label>
-                    <input
-                        type="password"
-                        id="password"
-                        name="password"
-                        class="form-control"
-                        placeholder="Введите пароль"
-                        autocomplete="current-password"
-                        required
-                    >
-                </div>
+                    <div style="margin-top: 15px;">
+                        <div class="form-group">
+                            <label for="username" class="form-label">Логин</label>
+                            <input
+                                type="text"
+                                id="username"
+                                name="username"
+                                class="form-control"
+                                placeholder="Введите логин"
+                                autocomplete="username"
+                            >
+                        </div>
 
-                <button type="submit" class="btn btn-primary">
-                    <span id="loginButtonText">Войти</span>
-                    <span id="loginSpinner" class="loading" style="display: none;"></span>
-                </button>
+                        <div class="form-group">
+                            <label for="password" class="form-label">Пароль</label>
+                            <input
+                                type="password"
+                                id="password"
+                                name="password"
+                                class="form-control"
+                                placeholder="Введите пароль"
+                                autocomplete="current-password"
+                            >
+                        </div>
+
+                        <button type="submit" class="btn btn-primary">
+                            <span id="superadminButtonText">Войти</span>
+                            <span id="superadminSpinner" class="loading" style="display: none;"></span>
+                        </button>
+                    </div>
+                </details>
             </form>
 
             <div class="divider">
                 <span>или</span>
             </div>
 
-            <!-- OTP Login Section -->
-            <div style="text-align: center; margin: 20px 0;">
-                <p style="color: #666; font-size: 14px; margin-bottom: 15px;">
-                    🔐 Вход через Telegram бот
-                </p>
-                <p style="color: #999; font-size: 13px; margin-bottom: 15px; line-height: 1.5;">
-                    1. Откройте бот @WhyVasyabot в Telegram<br>
-                    2. Напиши команду <code>/login</code><br>
-                    3. Введи полученный код ниже
-                </p>
-                <form id="otpForm" style="max-width: 200px; margin: 0 auto;">
-                    <div class="form-group">
-                        <input
-                            type="text"
-                            id="otpCode"
-                            name="otpCode"
-                            class="form-control"
-                            placeholder="123456"
-                            maxlength="6"
-                            pattern="[0-9]{6}"
-                            style="text-align: center; font-size: 24px; letter-spacing: 5px; font-weight: bold;"
-                            autocomplete="one-time-code"
-                            required
-                        >
-                    </div>
-                    <button type="submit" class="btn btn-primary" style="width: 100%;">
-                        <span id="otpButtonText">Войти по коду</span>
-                        <span id="otpSpinner" class="loading" style="display: none;"></span>
-                    </button>
-                </form>
+            <!-- OTP Login Section - Two Step Flow -->
+            <div id="otpSection">
+                <div id="otpAlertContainer"></div>
+
+                <!-- Step Indicator -->
+                <div class="step-indicator">
+                    <div class="step-dot active" id="step1Dot"></div>
+                    <div class="step-dot" id="step2Dot"></div>
+                </div>
+
+                <!-- Step 1: Enter Telegram ID -->
+                <div id="otpStep1" class="otp-step active">
+                    <p style="color: #666; font-size: 14px; margin-bottom: 15px; text-align: center;">
+                        🔐 Вход через Telegram
+                    </p>
+                    <p style="color: #999; font-size: 13px; margin-bottom: 15px; text-align: center; line-height: 1.5;">
+                        Введите ваш Telegram ID и мы отправим код подтверждения
+                    </p>
+                    <form id="requestOtpForm">
+                        <div class="form-group">
+                            <label for="telegramId" class="form-label">Ваш Telegram ID</label>
+                            <input
+                                type="text"
+                                id="telegramId"
+                                name="telegramId"
+                                class="form-control"
+                                placeholder="123456789"
+                                autocomplete="tel"
+                                required
+                            >
+                        </div>
+                        <button type="submit" class="btn btn-primary">
+                            <span id="requestOtpButtonText">Получить код</span>
+                            <span id="requestOtpSpinner" class="loading" style="display: none;"></span>
+                        </button>
+                    </form>
+                </div>
+
+                <!-- Step 2: Enter OTP Code -->
+                <div id="otpStep2" class="otp-step">
+                    <p style="color: #666; font-size: 14px; margin-bottom: 15px; text-align: center;">
+                        📱 Введите код из Telegram
+                    </p>
+                    <p style="color: #999; font-size: 13px; margin-bottom: 15px; text-align: center; line-height: 1.5;">
+                        Код отправлен в Telegram<br>
+                        <small id="telegramIdDisplay"></small>
+                    </p>
+                    <form id="verifyOtpForm">
+                        <div class="form-group">
+                            <input
+                                type="text"
+                                id="otpCode"
+                                name="otpCode"
+                                class="form-control"
+                                placeholder="123456"
+                                maxlength="6"
+                                pattern="[0-9]{6}"
+                                style="text-align: center; font-size: 24px; letter-spacing: 5px; font-weight: bold;"
+                                autocomplete="one-time-code"
+                                required
+                            >
+                        </div>
+                        <button type="submit" class="btn btn-primary">
+                            <span id="verifyOtpButtonText">Войти</span>
+                            <span id="verifyOtpSpinner" class="loading" style="display: none;"></span>
+                        </button>
+                        <button type="button" id="backToStep1" class="btn btn-secondary" style="width: 100%; margin-top: 10px;">
+                            Назад
+                        </button>
+                    </form>
+                </div>
             </div>
 
-            <!-- Telegram Login Widget (hidden, replaced with OTP) -->
-            <div id="telegram-login-btn" class="telegram-widget-container" style="display: none;"></div>
-
             <p style="text-align: center; margin-top: 20px; color: #999; font-size: 13px;">
-                Используя учётную запись администратора или код из Telegram бота
+                Используя Telegram ID или учётную запись администратора
             </p>
         </div>
     </div>
 
     <script>
-        const botUsername = 'YOUR_BOT_USERNAME';
-
-        // Debug: Log bot username
-        console.log('[DEBUG] Bot username:', botUsername);
-        console.log('[DEBUG] Widget should load:', botUsername && botUsername !== '__CONFIG_PLACEHOLDER__');
+        // State
+        let currentTelegramId = null;
 
         // Clear any password from URL (security)
         if (window.location.search && window.location.search.includes('password')) {
@@ -257,40 +306,36 @@
             window.location.href = '/';
         }
 
-        // Show alert message
-        function showAlert(message, type = 'danger') {
-            const container = document.getElementById('alertContainer');
-            container.innerHTML = `
+        // Show alert message in specific container
+        function showAlert(message, type = 'danger', container = 'alertContainer') {
+            const alertContainer = document.getElementById(container);
+            if (!alertContainer) return;
+
+            alertContainer.innerHTML = `
                 <div class="alert alert-${type}">
                     ${message}
                 </div>
             `;
             setTimeout(() => {
-                container.innerHTML = '';
+                alertContainer.innerHTML = '';
             }, 5000);
         }
 
-        // Set loading state
-        function setLoading(loading) {
-            document.getElementById('loginButtonText').style.display = loading ? 'none' : 'inline';
-            document.getElementById('loginSpinner').style.display = loading ? 'inline-block' : 'none';
-            document.querySelector('#loginForm button[type="submit"]').disabled = loading;
-        }
+        // ========== Superadmin Login ==========
 
-        // Login form handler
-        const loginForm = document.getElementById('loginForm');
-        loginForm.addEventListener('submit', async (e) => {
+        const superadminForm = document.getElementById('superadminForm');
+        superadminForm.addEventListener('submit', async (e) => {
             e.preventDefault();
 
             const username = document.getElementById('username').value.trim();
             const password = document.getElementById('password').value;
 
             if (!username || !password) {
-                showAlert('Пожалуйста, введите логин и пароль');
+                showAlert('Пожалуйста, введите логин и пароль', 'danger', 'superadminAlertContainer');
                 return;
             }
 
-            setLoading(true);
+            setSuperadminLoading(true);
 
             try {
                 const response = await fetch('/api/auth/superadmin', {
@@ -304,9 +349,7 @@
                 const data = await response.json();
 
                 if (response.ok) {
-                    // Store token
                     localStorage.setItem('token', data.access_token);
-                    // Fetch user info to get role
                     fetch('/api/auth/me', {
                         headers: { 'Authorization': `Bearer ${data.access_token}` }
                     }).then(resp => resp.json()).then(userInfo => {
@@ -314,81 +357,146 @@
                         localStorage.setItem('is_superadmin', userInfo.is_superadmin);
                         window.location.href = '/';
                     }).catch(() => {
-                        // Fallback - superadmin is always admin
                         localStorage.setItem('username', username);
                         localStorage.setItem('is_superadmin', 'true');
                         window.location.href = '/';
                     });
                 } else {
-                    showAlert(data.detail || 'Ошибка входа', 'danger');
+                    showAlert(data.detail || 'Ошибка входа', 'danger', 'superadminAlertContainer');
                 }
             } catch (error) {
-                showAlert('Ошибка соединения с сервером', 'danger');
+                showAlert('Ошибка соединения с сервером', 'danger', 'superadminAlertContainer');
                 console.error('Login error:', error);
             } finally {
-                setLoading(false);
+                setSuperadminLoading(false);
             }
         });
 
-        // OTP Login form handler
-        const otpForm = document.getElementById('otpForm');
-        if (otpForm) {
-            otpForm.addEventListener('submit', async (e) => {
-                e.preventDefault();
+        function setSuperadminLoading(loading) {
+            document.getElementById('superadminButtonText').style.display = loading ? 'none' : 'inline';
+            document.getElementById('superadminSpinner').style.display = loading ? 'inline-block' : 'none';
+            document.querySelector('#superadminForm button[type="submit"]').disabled = loading;
+        }
 
-                const code = document.getElementById('otpCode').value.trim();
+        // ========== OTP Login - Step 1: Request OTP ==========
 
-                if (!code || code.length !== 6 || !/^\d{6}$/.test(code)) {
-                    showAlert('Введите 6-значный код из Telegram');
-                    return;
+        const requestOtpForm = document.getElementById('requestOtpForm');
+        requestOtpForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const telegramId = document.getElementById('telegramId').value.trim();
+
+            if (!telegramId || !/^\d{7,15}$/.test(telegramId)) {
+                showAlert('Введите корректный Telegram ID (7-15 цифр)', 'danger', 'otpAlertContainer');
+                return;
+            }
+
+            setRequestOtpLoading(true);
+
+            try {
+                const response = await fetch('/api/auth/request-otp', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ telegram_id: parseInt(telegramId) })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    // Store telegram_id for next step
+                    currentTelegramId = parseInt(telegramId);
+
+                    // Show success message
+                    showAlert('Код отправлен в Telegram! Проверьте сообщения.', 'success', 'otpAlertContainer');
+
+                    // Move to step 2
+                    goToStep2();
+                } else {
+                    showAlert(data.detail || 'Ошибка отправки кода', 'danger', 'otpAlertContainer');
                 }
+            } catch (error) {
+                showAlert('Ошибка соединения с сервером', 'danger', 'otpAlertContainer');
+                console.error('Request OTP error:', error);
+            } finally {
+                setRequestOtpLoading(false);
+            }
+        });
 
-                setOtpLoading(true);
+        function setRequestOtpLoading(loading) {
+            document.getElementById('requestOtpButtonText').style.display = loading ? 'none' : 'inline';
+            document.getElementById('requestOtpSpinner').style.display = loading ? 'inline-block' : 'none';
+            document.querySelector('#requestOtpForm button[type="submit"]').disabled = loading;
+        }
 
-                try {
-                    const response = await fetch('/api/auth/otp', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify({ code })
+        // Auto-format Telegram ID input (only digits)
+        const telegramIdInput = document.getElementById('telegramId');
+        telegramIdInput.addEventListener('input', (e) => {
+            e.target.value = e.target.value.replace(/\D/g, '').slice(0, 15);
+        });
+
+        // ========== OTP Login - Step 2: Verify OTP ==========
+
+        const verifyOtpForm = document.getElementById('verifyOtpForm');
+        verifyOtpForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const code = document.getElementById('otpCode').value.trim();
+
+            if (!code || code.length !== 6 || !/^\d{6}$/.test(code)) {
+                showAlert('Введите 6-значный код из Telegram', 'danger', 'otpAlertContainer');
+                return;
+            }
+
+            setVerifyOtpLoading(true);
+
+            try {
+                const response = await fetch('/api/auth/verify-otp', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        telegram_id: currentTelegramId,
+                        otp: code
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    localStorage.setItem('token', data.access_token);
+                    fetch('/api/auth/me', {
+                        headers: { 'Authorization': `Bearer ${data.access_token}` }
+                    }).then(resp => resp.json()).then(user => {
+                        localStorage.setItem('username', user.username);
+                        localStorage.setItem('is_superadmin', user.is_superadmin);
+                        window.location.href = '/';
+                    }).catch(() => {
+                        window.location.href = '/';
                     });
-
-                    const data = await response.json();
-
-                    if (response.ok) {
-                        // Store token
-                        localStorage.setItem('token', data.access_token);
-                        // Store user info (fetch from /me endpoint)
-                        fetch('/api/auth/me', {
-                            headers: { 'Authorization': `Bearer ${data.access_token}` }
-                        }).then(resp => resp.json()).then(user => {
-                            localStorage.setItem('username', user.username);
-                            localStorage.setItem('is_superadmin', user.is_superadmin);
-                            // Redirect to dashboard
-                            window.location.href = '/';
-                        }).catch(() => {
-                            // Fallback if /me fails
-                            window.location.href = '/';
-                        });
-                    } else {
-                        showAlert(data.detail || 'Неверный или устаревший код', 'danger');
-                    }
-                } catch (error) {
-                    showAlert('Ошибка соединения с сервером', 'danger');
-                    console.error('OTP login error:', error);
-                } finally {
-                    setOtpLoading(false);
+                } else {
+                    showAlert(data.detail || 'Неверный или устаревший код', 'danger', 'otpAlertContainer');
                 }
-            });
+            } catch (error) {
+                showAlert('Ошибка соединения с сервером', 'danger', 'otpAlertContainer');
+                console.error('Verify OTP error:', error);
+            } finally {
+                setVerifyOtpLoading(false);
+            }
+        });
+
+        function setVerifyOtpLoading(loading) {
+            document.getElementById('verifyOtpButtonText').style.display = loading ? 'none' : 'inline';
+            document.getElementById('verifyOtpSpinner').style.display = loading ? 'inline-block' : 'none';
+            document.querySelector('#verifyOtpForm button[type="submit"]').disabled = loading;
         }
 
-        // Set OTP loading state
-        function setOtpLoading(loading) {
-            document.getElementById('otpButtonText').style.display = loading ? 'none' : 'inline';
-            document.getElementById('otpSpinner').style.display = loading ? 'inline-block' : 'none';
-            document.querySelector('#otpForm button[type="submit"]').disabled = loading;
-        }
+        // Back to step 1
+        document.getElementById('backToStep1').addEventListener('click', () => {
+            goToStep1();
+        });
 
         // Auto-format OTP input (only digits, max 6)
         const otpInput = document.getElementById('otpCode');
@@ -398,93 +506,32 @@
             });
         }
 
-        // Telegram Login Widget initialization
-        console.log('[DEBUG] Checking widget conditions...');
-        if (botUsername && botUsername !== '__CONFIG_PLACEHOLDER__' && botUsername.trim() !== '') {
-            console.log('[DEBUG] Initializing Telegram widget for:', botUsername);
+        // ========== Step Navigation ==========
 
-            // Wait for Telegram script to load
-            window.addEventListener('load', function() {
-                setTimeout(function() {
-                    console.log('[DEBUG] Page loaded, checking Telegram object...');
+        function goToStep2() {
+            document.getElementById('otpStep1').classList.remove('active');
+            document.getElementById('otpStep2').classList.add('active');
+            document.getElementById('step1Dot').classList.remove('active');
+            document.getElementById('step2Dot').classList.add('active');
+            document.getElementById('telegramIdDisplay').textContent = `Telegram ID: ${currentTelegramId}`;
 
-                    if (typeof Telegram === 'undefined') {
-                        console.error('[ERROR] Telegram object not found - script failed to load');
-                        const widgetContainer = document.getElementById('telegram-login-btn');
-                        if (widgetContainer) {
-                            widgetContainer.innerHTML = '<p style="color: #c33;">Telegram Widget не загрузился</p>';
-                        }
-                        return;
-                    }
+            // Clear previous alerts
+            document.getElementById('otpAlertContainer').innerHTML = '';
 
-                    console.log('[DEBUG] Telegram object found, calling Widget.Login');
+            // Focus on OTP input
+            setTimeout(() => {
+                document.getElementById('otpCode').focus();
+            }, 100);
+        }
 
-                    // Create script element dynamically with proper data attributes
-                    const script = document.createElement('script');
-                    script.async = true;
-                    script.src = 'https://telegram.org/js/telegram-widget.js?4';
-                    script.setAttribute('data-telegram-login', botUsername);
-                    script.setAttribute('data-size', 'large');
-                    script.setAttribute('data-radius', '8');
-                    script.setAttribute('data-request-access', 'write');
-                    script.setAttribute('data-userpic', 'true');
+        function goToStep1() {
+            document.getElementById('otpStep2').classList.remove('active');
+            document.getElementById('otpStep1').classList.add('active');
+            document.getElementById('step2Dot').classList.remove('active');
+            document.getElementById('step1Dot').classList.add('active');
 
-                    // Define the callback function globally
-                    window.onTelegramAuth = async function(user) {
-                        console.log('[DEBUG] Telegram auth successful:', user);
-                        try {
-                            const response = await fetch('/api/auth/telegram', {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/json',
-                                },
-                                body: JSON.stringify(user)
-                            });
-
-                            const data = await response.json();
-
-                            if (response.ok) {
-                                localStorage.setItem('token', data.access_token);
-                                // Fetch user info to get role
-                                fetch('/api/auth/me', {
-                                    headers: { 'Authorization': `Bearer ${data.access_token}` }
-                                }).then(resp => resp.json()).then(userInfo => {
-                                    localStorage.setItem('username', userInfo.username);
-                                    localStorage.setItem('is_superadmin', userInfo.is_superadmin);
-                                    window.location.href = '/';
-                                }).catch(() => {
-                                    // Fallback
-                                    localStorage.setItem('username', user.first_name || user.username);
-                                    window.location.href = '/';
-                                });
-                            } else {
-                                showAlert('Ошибка авторизации: ' + (data.detail || 'неизвестная ошибка'), 'danger');
-                            }
-                        } catch (error) {
-                            showAlert('Ошибка соединения с сервером', 'danger');
-                            console.error('Telegram auth error:', error);
-                        }
-                    };
-
-                    script.setAttribute('data-onauth', 'onTelegramAuth(user)');
-
-                    const widgetContainer = document.getElementById('telegram-login-btn');
-                    if (widgetContainer) {
-                        widgetContainer.innerHTML = '';
-                        widgetContainer.appendChild(script);
-                        console.log('[DEBUG] Telegram Widget script added to container');
-                    } else {
-                        console.error('[ERROR] Widget container not found');
-                    }
-                }, 500);
-            });
-        } else {
-            // Hide Telegram widget if not configured
-            console.log('[DEBUG] Widget not configured, hiding');
-            const widgetContainer = document.getElementById('telegram-login-btn');
-            if (widgetContainer) {
-                widgetContainer.style.display = 'none';
-            }
+            // Clear OTP input
+            document.getElementById('otpCode').value = '';
         }
     </script>
 </body>

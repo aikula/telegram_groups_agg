@@ -319,6 +319,7 @@ def register_handlers(dispatcher: Dispatcher) -> None:
     dispatcher.include_routers(handlers.command_router)
     dispatcher.include_routers(handlers.message_router)
     dispatcher.include_routers(handlers.callback_router)
+    dispatcher.include_routers(handlers.chat_member_router)
 
     logger.info("Handlers registered")
 

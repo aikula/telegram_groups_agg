@@ -22,6 +22,64 @@ logger = logging.getLogger(__name__)
 _app: Optional[FastAPI] = None
 
 
+async def security_headers_middleware(request: Request, call_next):
+    """
+    Add security headers to all responses.
+
+    Adds OWASP recommended security headers:
+    - X-Content-Type-Options: nosniff (prevent MIME sniffing)
+    - X-Frame-Options: DENY (prevent clickjacking)
+    - X-XSS-Protection: 1; mode=block (enable XSS filter)
+    - Strict-Transport-Security: max-age=31536000 (HTTPS only)
+    - Content-Security-Policy: default-src 'self' (restrict resources)
+
+    Note: HSTS is only added in production (not debug mode).
+          CSP is permissive for development.
+
+    Args:
+        request: FastAPI request
+        call_next: Next middleware/handler
+
+    Returns:
+        Response with security headers
+    """
+    response = await call_next(request)
+
+    # Prevent MIME type sniffing
+    response.headers["X-Content-Type-Options"] = "nosniff"
+
+    # Prevent clickjacking
+    response.headers["X-Frame-Options"] = "DENY"
+
+    # Enable browser XSS filter
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+
+    # HSTS (HTTPS only in production)
+    if not settings.debug:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+
+    # Content Security Policy (permissive for development)
+    # In production, consider stricter policies
+    csp_directives = [
+        "default-src 'self'",
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net",  # Allow inline scripts + Chart.js CDN
+        "style-src 'self' 'unsafe-inline'",  # Allow inline styles
+        "img-src 'self' data: https:",  # Allow data URLs and HTTPS images
+        "font-src 'self' data:",  # Allow data URLs for fonts
+        "connect-src 'self' https://cdn.jsdelivr.net",  # API calls + Chart.js source maps
+        "frame-ancestors 'none'",  # Prevent embedding in frames
+    ]
+    response.headers["Content-Security-Policy"] = "; ".join(csp_directives)
+
+    # Referrer Policy
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+
+    # Permissions Policy (restrict browser features)
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+
+    return response
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -112,6 +170,11 @@ def _create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # Import and setup middleware
+    from app.web.middleware import request_id_middleware
+    app.middleware("http")(request_id_middleware)
+    app.middleware("http")(security_headers_middleware)
+
     # Import and setup auth
     from app.web.auth import AuthManager, create_default_admin
 
@@ -135,7 +198,7 @@ def _create_app() -> FastAPI:
     app.state.bot = None  # Will be set when bot starts
 
     # Setup routes
-    from app.web.routes import auth, stats, chats, messages, export, health, webhook, admin
+    from app.web.routes import auth, stats, chats, messages, export, health, webhook, admin, bot, summary, feedback
     from app.web.middleware import auth_required
 
     # Include routers
@@ -145,6 +208,9 @@ def _create_app() -> FastAPI:
     app.include_router(messages.router, prefix="/api/messages", tags=["Messages"], dependencies=[auth_required])
     app.include_router(export.router, prefix="/api/export", tags=["Export"], dependencies=[auth_required])
     app.include_router(admin.router, prefix="/api/admin", tags=["Admin"], dependencies=[auth_required])
+    app.include_router(bot.router, prefix="/api/bot", tags=["Bot"], dependencies=[auth_required])
+    app.include_router(summary.router, prefix="/api/summary", tags=["Summary"], dependencies=[auth_required])
+    app.include_router(feedback.router, prefix="/api/feedback", tags=["Feedback"], dependencies=[auth_required])
     app.include_router(health.router, prefix="/api", tags=["Health"])
 
     # Webhook route (no auth required, validated by Telegram)
@@ -170,12 +236,18 @@ def _create_app() -> FastAPI:
     @app.get("/login", response_class=HTMLResponse)
     async def login_page():
         """Serve the login page with bot username injected."""
+        import asyncio
+
         login_path = static_dir / "login.html"
         if login_path.exists():
             bot_username = settings.telegram_bot_username
 
-            with open(login_path, "r", encoding="utf-8") as f:
-                html_content = f.read()
+            # Use asyncio.to_thread for non-blocking file read (Python 3.9+)
+            loop = asyncio.get_event_loop()
+            html_content = await loop.run_in_executor(
+                None,
+                lambda: login_path.read_text(encoding="utf-8")
+            )
 
             if not bot_username:
                 # Hide Telegram widget section if not configured
@@ -198,6 +270,47 @@ def _create_app() -> FastAPI:
 
             return HTMLResponse(content=html_content, headers=headers)
         return HTMLResponse("<h1>Login page not found.</h1>")
+
+    @app.get("/admin", response_class=HTMLResponse)
+    @app.get("/admin.html", response_class=HTMLResponse)
+    async def admin_page(request: Request):
+        """Serve the superadmin panel page.
+
+        Server-side auth check is performed via Authorization header.
+        For browser navigation, a cookie-based session is checked.
+        """
+        from app.web.middleware import required_auth
+
+        # Check authentication - allow both Bearer token and cookie
+        try:
+            user = await required_auth(request)
+        except HTTPException:
+            # Return 401 with JSON for AJAX, or redirect for navigation
+            auth_header = request.headers.get("Authorization")
+            if auth_header:
+                return JSONResponse(
+                    status_code=401,
+                    content={"error": "Authentication required"}
+                )
+            # For browser navigation without auth, show login link
+            return HTMLResponse(
+                '<html><body><h1>Authentication Required</h1>'
+                '<p><a href="/login">Login via Telegram</a></p></body></html>',
+                status_code=401
+            )
+
+        # Check superadmin permission
+        if not user.is_superadmin:
+            return HTMLResponse(
+                '<html><body><h1>Access Denied</h1>'
+                '<p>Superadmin access required.</p></body></html>',
+                status_code=403
+            )
+
+        admin_path = static_dir / "admin.html"
+        if admin_path.exists():
+            return FileResponse(str(admin_path))
+        return HTMLResponse("<h1>Admin panel not found.</h1>")
 
     # ========== API Documentation ==========
 

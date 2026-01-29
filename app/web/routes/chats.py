@@ -8,14 +8,72 @@ import logging
 import json
 from typing import Optional, List, Union
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# Constants
+DEFAULT_ENABLED_SKILLS = ["summary", "coach", "qa", "analytics"]
+VALID_SKILLS = {"summary", "coach", "qa", "analytics"}
 
-# Request/Response Models
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+def parse_enabled_skills(raw_data: str, default: Optional[List[str]] = None) -> List[str]:
+    """
+    Parse enabled_skills from database string to list.
+
+    Args:
+        raw_data: JSON string from database
+        default: Default value if parsing fails (defaults to DEFAULT_ENABLED_SKILLS)
+
+    Returns:
+        List of enabled skill names
+    """
+    if default is None:
+        default = DEFAULT_ENABLED_SKILLS.copy()
+
+    if not raw_data:
+        return default
+
+    if isinstance(raw_data, str):
+        try:
+            parsed = json.loads(raw_data)
+            if isinstance(parsed, list):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    if isinstance(raw_data, list):
+        return raw_data
+
+    return default
+
+
+def validate_enabled_skills(skills: List[str]) -> List[str]:
+    """
+    Validate and filter enabled_skills.
+
+    Args:
+        skills: List of skill names to validate
+
+    Returns:
+        Validated list with only valid skills
+
+    Raises:
+        HTTPException: If invalid skills found
+    """
+    invalid_skills = set(skills) - VALID_SKILLS
+    if invalid_skills:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid skills: {invalid_skills}. Valid skills: {VALID_SKILLS}"
+        )
+    return skills
 class ChatInfo(BaseModel):
     """Chat information model."""
     chat_id: int
@@ -35,7 +93,7 @@ class ChatSettingsLegacy(BaseModel):
 
 
 class ChatSettingsV21(BaseModel):
-    """Chat settings model (v2.1 format with enabled_skills JSON)."""
+    """Chat settings model (v2.2 format with enabled_skills JSON)."""
     chat_id: int
     enabled_skills: List[str] = Field(
         default=["summary", "coach", "qa", "analytics"],
@@ -48,6 +106,11 @@ class ChatSettingsV21(BaseModel):
     summary_target: Optional[str] = None
     coach_custom_prompt: Optional[str] = None
     coach_target: Optional[str] = None
+    bot_personality: Optional[str] = Field(
+        None,
+        max_length=2000,
+        description="Bot personality prompt for this chat (name, behavior, tone)"
+    )
 
 
 # Union type for backward compatibility
@@ -62,7 +125,7 @@ class ChatSettingsUpdateLegacy(BaseModel):
 
 
 class ChatSettingsUpdateV21(BaseModel):
-    """Chat settings update model (v2.1 format)."""
+    """Chat settings update model (v2.2 format)."""
     enabled_skills: Optional[List[str]] = Field(
         default=None,
         description="List of enabled skills: summary, coach, qa, analytics"
@@ -74,6 +137,11 @@ class ChatSettingsUpdateV21(BaseModel):
     summary_target: Optional[str] = None
     coach_custom_prompt: Optional[str] = None
     coach_target: Optional[str] = None
+    bot_personality: Optional[str] = Field(
+        None,
+        max_length=2000,
+        description="Bot personality prompt (name, behavior, tone)"
+    )
 
 
 # Union type for updates
@@ -128,9 +196,9 @@ async def get_my_chats(
 
     return [
         ChatInfo(
-            chat_id=chat["id"],
+            chat_id=chat.get("chat_id") or chat["id"],  # Use telegram chat_id if available
             title=chat.get("title", "Unknown Chat"),
-            chat_type=chat.get("chat_type", "unknown"),
+            chat_type=chat.get("type", "unknown"),
             created_at=chat.get("created_at"),
             deleted_at=chat.get("deleted_at"),
             member_count=chat.get("member_count")
@@ -172,9 +240,9 @@ async def get_chats(
 
     return [
         ChatInfo(
-            chat_id=chat["id"],
+            chat_id=chat.get("chat_id") or chat["id"],  # Use telegram chat_id if available
             title=chat.get("title", "Unknown Chat"),
-            chat_type=chat.get("chat_type", "unknown"),
+            chat_type=chat.get("type", "unknown"),
             created_at=chat.get("created_at"),
             deleted_at=chat.get("deleted_at"),
             member_count=chat.get("member_count")
@@ -213,14 +281,11 @@ async def get_chat_detail(request: Request, chat_id: int):
             "language": "ru"
         }
 
-    # Parse enabled_skills to list (v2.1 format)
-    enabled_skills = settings_data.get("enabled_skills", '["summary", "coach", "qa", "analytics"]')
-    if isinstance(enabled_skills, str):
-        try:
-            enabled_skills = json.loads(enabled_skills)
-        except json.JSONDecodeError:
-            # Fallback to default if JSON is invalid
-            enabled_skills = ["qa", "analytics"]
+    # Parse enabled_skills to list (v2.1 format) using helper
+    enabled_skills = parse_enabled_skills(
+        settings_data.get("enabled_skills"),
+        default=["qa", "analytics"]
+    )
 
     # Get message count
     messages = await db.get_messages(chat_id=chat_id, exclude_deleted=True)
@@ -234,7 +299,7 @@ async def get_chat_detail(request: Request, chat_id: int):
         chat=ChatInfo(
             chat_id=chat["id"],
             title=chat.get("title", "Unknown Chat"),
-            chat_type=chat.get("chat_type", "unknown"),
+            chat_type=chat.get("type", "unknown"),
             created_at=chat.get("created_at"),
             deleted_at=chat.get("deleted_at"),
             member_count=member_count
@@ -285,13 +350,11 @@ async def get_chat_settings(request: Request, chat_id: int):
             "language": "ru"
         }
 
-    # Parse enabled_skills
-    enabled_skills = settings_data.get("enabled_skills", '["summary", "coach", "qa", "analytics"]')
-    if isinstance(enabled_skills, str):
-        try:
-            enabled_skills = json.loads(enabled_skills)
-        except json.JSONDecodeError:
-            enabled_skills = ["qa", "analytics"]
+    # Parse enabled_skills using helper
+    enabled_skills = parse_enabled_skills(
+        settings_data.get("enabled_skills"),
+        default=["qa", "analytics"]
+    )
 
     return ChatSettingsV21(
         chat_id=chat_id,
@@ -302,7 +365,8 @@ async def get_chat_settings(request: Request, chat_id: int):
         summary_custom_prompt=settings_data.get("summary_custom_prompt"),
         summary_target=settings_data.get("summary_target"),
         coach_custom_prompt=settings_data.get("coach_custom_prompt"),
-        coach_target=settings_data.get("coach_target")
+        coach_target=settings_data.get("coach_target"),
+        bot_personality=settings_data.get("bot_personality")
     )
 
 
@@ -329,11 +393,12 @@ async def update_chat_settings(request: Request, chat_id: int, update: dict = No
         "summary_custom_prompt": "Custom prompt",
         "summary_target": "chat",
         "coach_custom_prompt": "Custom prompt",
-        "coach_target": "chat"
+        "coach_target": "chat",
+        "bot_personality": "Ты полезный ассистент Иван, добрый и вежливый"
     }
 
     Returns:
-        Updated chat settings (v2.1 format)
+        Updated chat settings (v2.2 format)
     """
     from app.web.middleware import can_modify_chat_settings, get_user_role_in_chat
     from pydantic import BaseModel, Field
@@ -356,13 +421,11 @@ async def update_chat_settings(request: Request, chat_id: int, update: dict = No
             "language": "ru"
         }
 
-    # Parse current enabled_skills
-    current_enabled = current.get("enabled_skills", '["summary", "coach", "qa", "analytics"]')
-    if isinstance(current_enabled, str):
-        try:
-            current_enabled = json.loads(current_enabled)
-        except json.JSONDecodeError:
-            current_enabled = ["qa", "analytics"]
+    # Parse current enabled_skills using helper
+    current_enabled = parse_enabled_skills(
+        current.get("enabled_skills"),
+        default=["qa", "analytics"]
+    )
 
     # Use update dict if provided, otherwise empty
     updates = update or {}
@@ -370,14 +433,8 @@ async def update_chat_settings(request: Request, chat_id: int, update: dict = No
     # Handle v2.1 enabled_skills format
     if "enabled_skills" in updates:
         enabled_skills = updates["enabled_skills"]
-        # Validate skills
-        valid_skills = {"summary", "coach", "qa", "analytics"}
-        invalid_skills = set(enabled_skills) - valid_skills
-        if invalid_skills:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid skills: {invalid_skills}. Valid skills: {valid_skills}"
-            )
+        # Validate skills using helper
+        validate_enabled_skills(enabled_skills)
         # Will be JSON encoded later
 
     # Handle legacy v2.0 boolean format (convert to v2.1)
@@ -423,13 +480,11 @@ async def update_chat_settings(request: Request, chat_id: int, update: dict = No
     if updated is None:
         updated = {}
 
-    # Parse enabled_skills from response
-    final_enabled = updated.get("enabled_skills", json.dumps(current_enabled))
-    if isinstance(final_enabled, str):
-        try:
-            final_enabled = json.loads(final_enabled)
-        except json.JSONDecodeError:
-            final_enabled = ["qa", "analytics"]
+    # Parse enabled_skills from response using helper
+    final_enabled = parse_enabled_skills(
+        updated.get("enabled_skills"),
+        default=current_enabled if current_enabled else ["qa", "analytics"]
+    )
 
     logger.info(
         f"Chat settings updated: chat_id={chat_id}, "
@@ -446,7 +501,8 @@ async def update_chat_settings(request: Request, chat_id: int, update: dict = No
         summary_custom_prompt=updated.get("summary_custom_prompt"),
         summary_target=updated.get("summary_target"),
         coach_custom_prompt=updated.get("coach_custom_prompt"),
-        coach_target=updated.get("coach_target")
+        coach_target=updated.get("coach_target"),
+        bot_personality=updated.get("bot_personality", current.get("bot_personality"))
     )
 
 
@@ -485,4 +541,39 @@ async def get_chat_members(
         "chat_id": chat_id,
         "members": members,
         "total": len(members)
+    }
+
+
+@router.get("/{chat_id}/role")
+async def get_my_role_in_chat(request: Request, chat_id: int):
+    """
+    Get current user's role in a specific chat.
+
+    Path parameters:
+        chat_id: Telegram chat ID
+
+    Returns:
+        User's role and permissions for this chat
+    """
+    from app.web.middleware import required_auth, get_user_role_in_chat
+
+    user = await required_auth(request)
+    db = request.app.state.db
+
+    # Check chat exists
+    chat = await db.get_chat_by_id(chat_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    # Get user's role in this chat
+    role = await get_user_role_in_chat(request, chat_id)
+
+    # Determine if user can modify settings
+    can_modify = role in ['admin', 'owner'] or user.is_superadmin
+
+    return {
+        "chat_id": chat_id,
+        "role": role,
+        "can_modify": can_modify,
+        "is_member": role != "non_member"
     }

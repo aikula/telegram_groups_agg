@@ -8,6 +8,10 @@ let chats = [];
 let currentToken = localStorage.getItem('token');
 let isSuperadmin = false;
 
+// Chat state
+let currentChatSettings = null;
+let selectedSettingsChatId = null;
+
 // Check authentication on load
 document.addEventListener('DOMContentLoaded', async () => {
     if (!currentToken) {
@@ -30,6 +34,14 @@ document.addEventListener('DOMContentLoaded', async () => {
             document.getElementById('userName').textContent = user.username;
             document.getElementById('userAvatar').textContent = user.username.charAt(0).toUpperCase();
 
+            // Show admin link for superadmins
+            if (user.is_superadmin) {
+                const adminLink = document.getElementById('adminLink');
+                if (adminLink) {
+                    adminLink.style.display = 'inline-block';
+                }
+            }
+
             // Add body class for CSS-based visibility control
             if (isSuperadmin) {
                 document.body.classList.add('is-superadmin');
@@ -39,12 +51,21 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (!isSuperadmin) {
                 document.title = 'Мои чаты - Telegram Chat Analytics';
             }
+        } else if (response.status === 401) {
+            // Token is invalid or expired - redirect to login
+            logout();
+            return;
         } else {
             throw new Error('Failed to get user info');
         }
     } catch (error) {
         console.error('Error loading user info:', error);
-        // Fallback to localStorage
+        // On 401 or other auth errors - redirect to login
+        if (error.message === 'Unauthorized' || !currentToken) {
+            logout();
+            return;
+        }
+        // Fallback only if token exists (network error, etc)
         isSuperadmin = localStorage.getItem('is_superadmin') === 'true';
         const username = localStorage.getItem('username') || 'User';
         document.getElementById('userName').textContent = username;
@@ -52,6 +73,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         if (isSuperadmin) {
             document.body.classList.add('is-superadmin');
+            // Show admin link for superadmins
+            const adminLink = document.getElementById('adminLink');
+            if (adminLink) {
+                adminLink.style.display = 'inline-block';
+            }
         }
     }
 
@@ -76,7 +102,8 @@ async function apiCall(endpoint, options = {}) {
     const response = await fetch(endpoint, { ...options, headers });
 
     if (response.status === 401) {
-        logout();
+        // Don't call logout() here to avoid recursion
+        // Let the calling code handle the error
         throw new Error('Unauthorized');
     }
 
@@ -98,25 +125,8 @@ async function loadChats() {
         const data = await response.json();
         chats = data;
 
-        // Populate chat selects
-        const chatSelect = document.getElementById('chatSelect');
-        const summaryChatSelect = document.getElementById('summaryChatSelect');
-
-        // Save current selection
-        const currentChat = chatSelect.value;
-
-        // Clear and populate
-        chatSelect.innerHTML = '<option value="">Все чаты</option>';
-        summaryChatSelect.innerHTML = '<option value="">Выберите чат...</option>';
-
-        chats.forEach(chat => {
-            const option = `<option value="${chat.chat_id}">${chat.title}</option>`;
-            chatSelect.innerHTML += option;
-            summaryChatSelect.innerHTML += option;
-        });
-
-        // Restore selection
-        chatSelect.value = currentChat;
+        // Populate all chat selects
+        populateChatSelects(chats);
 
         // Update active chats count
         document.getElementById('activeChats').textContent = chats.length;
@@ -124,6 +134,106 @@ async function loadChats() {
     } catch (error) {
         console.error('Error loading chats:', error);
         showAlert('Ошибка загрузки списка чатов', 'danger');
+    }
+}
+
+function populateChatSelects(chats) {
+    // All selects that need to be populated
+    const selects = [
+        'chatSelect',
+        'summaryChatSelect',
+        'settingsChatSelect',
+        'botChatSelect'
+    ];
+
+    selects.forEach(selectId => {
+        const select = document.getElementById(selectId);
+        if (!select) return;
+
+        // Save current selection
+        const currentValue = select.value;
+
+        // Clear and populate
+        if (selectId === 'chatSelect') {
+            select.innerHTML = '<option value="">Все чаты</option>';
+        } else {
+            select.innerHTML = '<option value="">Выберите чат...</option>';
+        }
+
+        chats.forEach(chat => {
+            const option = `<option value="${chat.chat_id}">${escapeHtml(chat.title)}</option>`;
+            select.innerHTML += option;
+        });
+
+        // Restore selection
+        select.value = currentValue;
+    });
+
+    // Setup role-based button state for settings chat select
+    setupSettingsChatRoleCheck();
+}
+
+// Setup role checking for settings chat selection
+async function setupSettingsChatRoleCheck() {
+    const settingsSelect = document.getElementById('settingsChatSelect');
+    const loadBtn = document.getElementById('loadSettingsBtn');
+
+    if (!settingsSelect || !loadBtn) return;
+
+    // Function to check role and update button state
+    const checkRoleAndUpdateButton = async () => {
+        const chatId = settingsSelect.value;
+
+        // Reset button state if no chat selected
+        if (!chatId) {
+            loadBtn.disabled = true;
+            loadBtn.title = 'Выберите чат для загрузки настроек';
+            loadBtn.classList.remove('btn-secondary');
+            loadBtn.classList.add('btn-primary');
+            return;
+        }
+
+        try {
+            // Check user's role in this chat
+            const response = await apiCall(`/api/chats/${chatId}/role`);
+            if (response.ok) {
+                const roleData = await response.json();
+
+                if (roleData.can_modify) {
+                    // User is admin/owner/superadmin - enable button
+                    loadBtn.disabled = false;
+                    loadBtn.title = `Загрузить настройки для "${settingsSelect.options[settingsSelect.selectedIndex].text}"`;
+                    loadBtn.classList.remove('btn-secondary');
+                    loadBtn.classList.add('btn-primary');
+                } else {
+                    // User is only a member - disable button
+                    loadBtn.disabled = true;
+                    loadBtn.title = `Только администраторы могут настраивать этот чат (ваша роль: ${roleData.role || 'member'})`;
+                    loadBtn.classList.remove('btn-primary');
+                    loadBtn.classList.add('btn-secondary');
+                }
+            } else {
+                // Error checking role - disable button
+                loadBtn.disabled = true;
+                loadBtn.title = 'Не удалось проверить права доступа';
+                loadBtn.classList.remove('btn-primary');
+                loadBtn.classList.add('btn-secondary');
+            }
+        } catch (error) {
+            console.error('Error checking role:', error);
+            loadBtn.disabled = true;
+            loadBtn.title = 'Ошибка проверки прав доступа';
+            loadBtn.classList.remove('btn-primary');
+            loadBtn.classList.add('btn-secondary');
+        }
+    };
+
+    // Add event listener for chat selection changes
+    settingsSelect.addEventListener('change', checkRoleAndUpdateButton);
+
+    // Initial check in case a chat is already selected
+    if (settingsSelect.value) {
+        checkRoleAndUpdateButton();
     }
 }
 
@@ -175,6 +285,298 @@ async function loadMessages(chatId, days) {
 
     // Update recent messages
     updateRecentMessages(data.messages.slice(0, 20));
+}
+
+// ========== Chat Settings ==========
+
+async function loadChatSettings() {
+    const chatId = document.getElementById('settingsChatSelect').value;
+
+    if (!chatId) {
+        showAlert('Выберите чат для загрузки настроек', 'warning');
+        return;
+    }
+
+    selectedSettingsChatId = parseInt(chatId);
+
+    // First check if user can modify settings in this chat
+    try {
+        const roleResponse = await apiCall(`/api/chats/${chatId}/role`);
+        if (!roleResponse.ok) {
+            throw new Error('Failed to check role');
+        }
+        const roleData = await roleResponse.json();
+
+        if (!roleData.can_modify) {
+            showAlert('Только администраторы могут настраивать этот чат', 'warning');
+            return;
+        }
+    } catch (error) {
+        console.error('Error checking role:', error);
+        showAlert('Ошибка проверки прав доступа', 'danger');
+        return;
+    }
+
+    try {
+        const response = await apiCall(`/api/chats/${chatId}/settings`);
+
+        if (!response.ok) {
+            throw new Error('Failed to load chat settings');
+        }
+
+        const settings = await response.json();
+        currentChatSettings = settings;
+
+        // Show settings content
+        document.getElementById('chatSettingsContent').style.display = 'block';
+
+        // Populate skills toggles
+        populateSkills(settings.enabled_skills || []);
+
+        // Populate additional settings
+        document.getElementById('settingLanguage').value = settings.language || 'ru';
+        document.getElementById('settingSummaryTime').value = settings.summary_time_local || '16:00';
+        document.getElementById('settingTimezone').value = settings.summary_timezone || 'Europe/Moscow';
+        document.getElementById('settingBotPersonality').value = settings.bot_personality || '';
+
+        showAlert('Настройки загружены', 'success');
+
+    } catch (error) {
+        console.error('Error loading chat settings:', error);
+        showAlert('Ошибка загрузки настроек: ' + error.message, 'danger');
+    }
+}
+
+function populateSkills(enabledSkills) {
+    const container = document.getElementById('skillsContainer');
+
+    const skills = [
+        { key: 'summary', name: '📊 Ежедневные сводки', desc: 'Автоматические сводки чата' },
+        { key: 'coach', name: '🎓 Коучинг', desc: 'Рекомендации по коммуникации' },
+        { key: 'qa', name: '❓ Вопрос-ответ', desc: 'Ответы на вопросы с контекстом' },
+        { key: 'analytics', name: '📈 Аналитика', desc: 'SQL-запросы и статистика' }
+    ];
+
+    container.innerHTML = skills.map(skill => {
+        const isEnabled = enabledSkills.includes(skill.key);
+        return `
+            <div class="skill-card">
+                <div class="skill-info">
+                    <div class="skill-icon">${skill.name.split(' ')[0]}</div>
+                    <div>
+                        <div class="skill-name">${skill.name.split(' ').slice(1).join(' ')}</div>
+                        <div class="skill-desc">${skill.desc}</div>
+                    </div>
+                </div>
+                <label class="toggle-switch">
+                    <input type="checkbox"
+                           id="skill_${skill.key}"
+                           ${isEnabled ? 'checked' : ''}
+                           onchange="toggleSkill('${skill.key}')">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+        `;
+    }).join('');
+}
+
+async function toggleSkill(skillKey) {
+    if (!currentChatSettings || !selectedSettingsChatId) {
+        showAlert('Сначала загрузите настройки чата', 'warning');
+        // Reset checkbox
+        document.getElementById(`skill_${skillKey}`).checked =
+            !document.getElementById(`skill_${skillKey}`).checked;
+        return;
+    }
+
+    const checkbox = document.getElementById(`skill_${skillKey}`);
+    const isEnabled = checkbox.checked;
+
+    // Update local state
+    let enabledSkills = currentChatSettings.enabled_skills || [];
+    if (isEnabled && !enabledSkills.includes(skillKey)) {
+        enabledSkills.push(skillKey);
+    } else if (!isEnabled && enabledSkills.includes(skillKey)) {
+        enabledSkills = enabledSkills.filter(s => s !== skillKey);
+    }
+
+    // Save to server
+    try {
+        const response = await apiCall(`/api/chats/${selectedSettingsChatId}/settings`, {
+            method: 'PUT',
+            body: JSON.stringify({ enabled_skills: enabledSkills })
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to update settings');
+        }
+
+        const updated = await response.json();
+        currentChatSettings = updated;
+
+        showAlert(`Навык "${skillKey}" ${isEnabled ? 'включен' : 'выключен'}`, 'success');
+
+    } catch (error) {
+        console.error('Error toggling skill:', error);
+        showAlert('Ошибка обновления настроек: ' + error.message, 'danger');
+        // Revert checkbox
+        checkbox.checked = !checkbox.checked;
+    }
+}
+
+async function saveChatSettings() {
+    if (!selectedSettingsChatId) {
+        showAlert('Выберите чат для сохранения настроек', 'warning');
+        return;
+    }
+
+    const language = document.getElementById('settingLanguage').value;
+    const summaryTimeLocal = document.getElementById('settingSummaryTime').value;
+    const summaryTimezone = document.getElementById('settingTimezone').value;
+    const botPersonality = document.getElementById('settingBotPersonality').value.trim();
+
+    try {
+        const bodyData = {
+            language: language,
+            summary_time_local: summaryTimeLocal,
+            summary_timezone: summaryTimezone
+        };
+
+        // Only include bot_personality if not empty
+        if (botPersonality) {
+            bodyData.bot_personality = botPersonality;
+        }
+
+        const response = await apiCall(`/api/chats/${selectedSettingsChatId}/settings`, {
+            method: 'PUT',
+            body: JSON.stringify(bodyData)
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to save settings');
+        }
+
+        showAlert('Настройки сохранены!', 'success');
+
+        // Reload settings
+        await loadChatSettings();
+
+    } catch (error) {
+        console.error('Error saving chat settings:', error);
+        showAlert('Ошибка сохранения настроек: ' + error.message, 'danger');
+    }
+}
+
+// ========== Bot Chat ==========
+
+async function sendBotMessage() {
+    const chatId = document.getElementById('botChatSelect').value;
+    const input = document.getElementById('chatInput');
+    const message = input.value.trim();
+
+    if (!chatId) {
+        showAlert('Выберите чат для контекста бота', 'warning');
+        return;
+    }
+
+    if (!message) {
+        return;
+    }
+
+    // Clear input
+    input.value = '';
+
+    // Add user message to chat
+    addChatMessage('user', message);
+
+    // Show typing indicator
+    const typingId = showTypingIndicator();
+
+    // Disable send button
+    const sendBtn = document.getElementById('chatSendBtn');
+    sendBtn.disabled = true;
+
+    try {
+        const response = await apiCall('/api/bot/send', {
+            method: 'POST',
+            body: JSON.stringify({
+                chat_id: parseInt(chatId),
+                message: message
+            })
+        });
+
+        const data = await response.json();
+
+        // Remove typing indicator
+        removeTypingIndicator(typingId);
+
+        if (data.success && data.response) {
+            addChatMessage('bot', data.response);
+        } else if (data.error) {
+            addChatMessage('system', 'Ошибка: ' + data.error);
+        } else {
+            addChatMessage('system', 'Бот не вернул ответ');
+        }
+
+    } catch (error) {
+        console.error('Error sending bot message:', error);
+        // Remove typing indicator on error
+        removeTypingIndicator(typingId);
+        addChatMessage('system', 'Ошибка отправки сообщения');
+    } finally {
+        sendBtn.disabled = false;
+    }
+}
+
+function addChatMessage(type, text) {
+    const container = document.getElementById('chatMessages');
+
+    const messageDiv = document.createElement('div');
+    messageDiv.className = `chat-message ${type}`;
+
+    // Use innerHTML with escapeHtml to preserve line breaks for bot messages
+    if (type === 'bot') {
+        messageDiv.innerHTML = escapeHtml(text);
+    } else {
+        messageDiv.textContent = text;
+    }
+
+    container.appendChild(messageDiv);
+
+    // Scroll to bottom
+    container.scrollTop = container.scrollHeight;
+}
+
+function showTypingIndicator() {
+    const container = document.getElementById('chatMessages');
+
+    const typingDiv = document.createElement('div');
+    typingDiv.className = 'chat-message bot typing-indicator';
+    const typingId = 'typing-' + Date.now();
+    typingDiv.id = typingId;
+
+    typingDiv.innerHTML = `
+        <span></span>
+        <span></span>
+        <span></span>
+    `;
+
+    container.appendChild(typingDiv);
+    container.scrollTop = container.scrollHeight;
+
+    return typingId;
+}
+
+function removeTypingIndicator(typingId) {
+    const typingElement = document.getElementById(typingId);
+    if (typingElement) {
+        typingElement.remove();
+    }
+}
+
+function clearChat() {
+    const container = document.getElementById('chatMessages');
+    container.innerHTML = '<div class="chat-message system">История очищена. Выберите чат и задайте вопрос боту.</div>';
 }
 
 // ========== LLM Stats ==========
@@ -501,6 +903,37 @@ async function sendSummary() {
     }
 }
 
+// ========== Feedback ==========
+
+async function sendFeedback() {
+    const category = document.getElementById('feedbackCategory').value;
+    const message = document.getElementById('feedbackMessage').value.trim();
+
+    if (!message) {
+        showAlert('Напишите сообщение', 'warning');
+        return;
+    }
+
+    try {
+        const response = await apiCall('/api/feedback', {
+            method: 'POST',
+            body: JSON.stringify({ category, message })
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            showAlert('Спасибо за отзыв!', 'success');
+            document.getElementById('feedbackMessage').value = '';
+        } else {
+            showAlert('Ошибка отправки: ' + (data.detail || 'Неизвестная ошибка'), 'danger');
+        }
+    } catch (error) {
+        console.error('Feedback error:', error);
+        showAlert('Ошибка отправки отзыва', 'danger');
+    }
+}
+
 function showSummaryModal(data) {
     // Remove existing modal
     const existingModal = document.getElementById('summaryModal');
@@ -559,10 +992,23 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-function logout() {
-    localStorage.removeItem('token');
-    localStorage.removeItem('username');
-    window.location.href = '/login';
+async function logout() {
+    try {
+        // Notify server about logout (for logging/audit purposes)
+        if (currentToken) {
+            await fetch('/api/auth/logout', {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${currentToken}` }
+            }).catch(() => {}); // Ignore errors - we're logging out anyway
+        }
+    } finally {
+        // Always clear local storage and redirect
+        localStorage.removeItem('token');
+        localStorage.removeItem('username');
+        localStorage.removeItem('is_superadmin');
+        currentToken = null;
+        window.location.href = '/login';
+    }
 }
 
 // ========== Event Listeners ==========

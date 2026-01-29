@@ -140,78 +140,77 @@ async def get_global_stats(
 
     db = request.app.state.db
 
-    # Get all chats
+    # Get all chats (lightweight)
     all_chats = await db.get_chats(active_only=False, limit=10000)
     active_chats = await db.get_chats(active_only=True, limit=10000)
 
-    # Count total messages
-    messages = await db.get_messages(limit=1000000, exclude_deleted=True)
-    total_messages = len(messages)
-
-    # Count messages today
+    # Use SQL aggregation for stats (much faster than loading all messages)
     today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    messages_today = [
-        m for m in messages
-        if m.get('timestamp')
-        and (
-            (
-                isinstance(m['timestamp'], str) and
-                datetime.fromisoformat(m['timestamp'].replace('Z', '+00:00')) >= today_start
-            )
-            or (
-                isinstance(m['timestamp'], datetime) and
-                m['timestamp'] >= today_start
-            )
-        )
-    ]
-
-    # Count messages this week
     week_start = datetime.now() - timedelta(days=7)
-    messages_this_week = [
-        m for m in messages
-        if m.get('timestamp')
-        and (
-            (
-                isinstance(m['timestamp'], str) and
-                datetime.fromisoformat(m['timestamp'].replace('Z', '+00:00')) >= week_start
-            )
-            or (
-                isinstance(m['timestamp'], datetime) and
-                m['timestamp'] >= week_start
-            )
-        )
+
+    # Total messages
+    total_result = await db.execute_query(
+        "SELECT COUNT(*) as count FROM messages WHERE reply_to_id IS NULL"
+    )
+    total_messages = total_result[0]["count"] if total_result else 0
+
+    # Messages today
+    today_result = await db.execute_query(
+        "SELECT COUNT(*) as count FROM messages WHERE reply_to_id IS NULL AND timestamp >= ?",
+        (today_start.isoformat(),)
+    )
+    messages_today = today_result[0]["count"] if today_result else 0
+
+    # Messages this week
+    week_result = await db.execute_query(
+        "SELECT COUNT(*) as count FROM messages WHERE reply_to_id IS NULL AND timestamp >= ?",
+        (week_start.isoformat(),)
+    )
+    messages_this_week = week_result[0]["count"] if week_result else 0
+
+    # Unique users
+    users_result = await db.execute_query(
+        "SELECT COUNT(DISTINCT user_id) as count FROM messages WHERE reply_to_id IS NULL"
+    )
+    total_users = users_result[0]["count"] if users_result else 0
+
+    # Top chats by message count (single query with JOIN)
+    top_chats_result = await db.execute_query("""
+        SELECT
+            m.chat_id,
+            c.title,
+            COUNT(*) as message_count
+        FROM messages m
+        LEFT JOIN chats c ON m.chat_id = c.chat_id
+        WHERE m.reply_to_id IS NULL
+        GROUP BY m.chat_id, c.title
+        ORDER BY message_count DESC
+        LIMIT 10
+    """)
+
+    top_chats = [
+        {
+            "chat_id": row["chat_id"],
+            "title": row.get("title") or f'Chat {row["chat_id"]}',
+            "message_count": row["message_count"]
+        }
+        for row in top_chats_result
     ]
 
-    # Get unique users
-    unique_users = set()
-    for msg in messages:
-        if msg.get('user_id'):
-            unique_users.add(msg['user_id'])
-
-    # Get top chats by message count
-    chat_message_counts = {}
-    for msg in messages:
-        chat_id = msg.get('chat_id')
-        if chat_id:
-            chat_message_counts[chat_id] = chat_message_counts.get(chat_id, 0) + 1
-
-    top_chats = []
-    for chat_id, count in sorted(chat_message_counts.items(), key=lambda x: x[1], reverse=True)[:10]:
-        chat = await db.get_chat_by_id(chat_id)
-        if chat:
-            top_chats.append({
-                "chat_id": chat_id,
-                "title": chat.get('title', f'Chat {chat_id}'),
-                "message_count": count
-            })
-
-    # Calculate storage size (estimate)
+    # Calculate storage size (estimate) - use executor to avoid blocking
     storage_size_mb = None
     try:
         import os
+        import asyncio
+
         db_path = db.db_path
-        if os.path.exists(db_path):
-            storage_size_mb = round(os.path.getsize(db_path) / (1024 * 1024), 2)
+        loop = asyncio.get_event_loop()
+
+        # Run blocking file stat in executor to avoid blocking event loop
+        storage_size_mb = await loop.run_in_executor(
+            None,
+            lambda: round(os.path.getsize(db_path) / (1024 * 1024), 2) if os.path.exists(db_path) else None
+        )
     except Exception:
         pass
 
@@ -219,9 +218,9 @@ async def get_global_stats(
         total_chats=len(all_chats),
         active_chats=len(active_chats),
         total_messages=total_messages,
-        total_users=len(unique_users),
-        messages_today=len(messages_today),
-        messages_this_week=len(messages_this_week),
+        total_users=total_users,
+        messages_today=messages_today,
+        messages_this_week=messages_this_week,
         top_chats_by_messages=top_chats,
         storage_size_mb=storage_size_mb
     )
@@ -399,3 +398,219 @@ async def get_audit_log(
         page_size=page_size,
         entries=entries
     )
+
+
+@router.get("/users")
+async def get_users_stats(request: Request):
+    """
+    Get users statistics (superadmin only).
+
+    Returns list of users with their chat count, message count, and LLM usage.
+    """
+    await require_superadmin(request)
+
+    db = request.app.state.db
+
+    # Query to get users with their stats
+    query = """
+        SELECT
+            u.id as user_id,
+            u.username,
+            u.first_name,
+            COUNT(DISTINCT cm.chat_id) as chat_count,
+            COUNT(DISTINCT m.id) as message_count,
+            (SELECT COUNT(*) FROM llm_usage WHERE user_id = u.id) as llm_requests
+        FROM users u
+        LEFT JOIN chat_members cm ON COALESCE(cm.user_id, u.id) = u.id
+        LEFT JOIN messages m ON m.user_id = u.id
+        GROUP BY u.id
+        ORDER BY message_count DESC
+    """
+
+    rows = await db.execute_query(query)
+
+    return [
+        {
+            "user_id": row["user_id"],
+            "username": row.get("username"),
+            "chat_count": row.get("chat_count", 0),
+            "message_count": row.get("message_count", 0),
+            "llm_requests": row.get("llm_requests", 0)
+        }
+        for row in rows
+    ]
+
+
+@router.get("/feedback")
+async def get_admin_feedback(
+    request: Request,
+    status: Optional[str] = Query(None, description="Filter by status")
+):
+    """
+    Get all feedback entries (superadmin only).
+
+    This endpoint provides the same data as /api/feedback but is explicitly
+    for the admin panel. Maintains consistency with admin routes structure.
+    """
+    await require_superadmin(request)
+
+    db = request.app.state.db
+
+    feedback_list = await db.get_feedback(status=status)
+
+    return [
+        {
+            "id": item['id'],
+            "user_id": item.get('user_id'),
+            "username": item.get('username'),
+            "chat_id": item.get('chat_id'),
+            "chat_title": item.get('chat_title'),
+            "source": item['source'],
+            "category": item['category'],
+            "message": item['message'],
+            "rating": item.get('rating'),
+            "status": item['status'],
+            "created_at": item['created_at'],
+            "resolved_at": item.get('resolved_at')
+        }
+        for item in feedback_list
+    ]
+
+
+# ============================================================================
+# Skill Prompts Management (v2.2)
+# ============================================================================
+
+class SkillPromptUpdate(BaseModel):
+    """Skill prompt update model."""
+    prompt: str = Field(..., min_length=50, max_length=50000, description="Prompt text")
+    is_active: bool = True
+    change_reason: Optional[str] = Field(None, max_length=500, description="Reason for change")
+
+
+class SkillPromptResponse(BaseModel):
+    """Skill prompt response model."""
+    skill_name: str
+    prompt: str
+    is_active: bool
+    version: int
+    updated_at: str
+
+
+@router.get("/skill-prompts")
+async def get_skill_prompts(request: Request):
+    """
+    Get all skill prompts (superadmin only).
+
+    Returns list of skill prompts with their status.
+    """
+    await require_superadmin(request)
+
+    db = request.app.state.db
+    prompts = await db.get_all_skill_prompts()
+
+    return prompts
+
+
+@router.get("/skill-prompts/{skill_name}/history")
+async def get_skill_prompt_history(
+    request: Request,
+    skill_name: str,
+    limit: int = 20
+):
+    """
+    Get version history for a skill prompt (superadmin only).
+
+    Path parameters:
+        skill_name: Skill name ('qa', 'summary', 'coach', 'analytics')
+
+    Query parameters:
+        limit: Maximum versions to return (default: 20)
+
+    Returns list of prompt versions.
+    """
+    await require_superadmin(request)
+
+    if skill_name not in ['qa', 'summary', 'coach', 'analytics', 'about']:
+        raise HTTPException(status_code=400, detail="Invalid skill name")
+
+    db = request.app.state.db
+    history = await db.get_skill_prompt_history(skill_name, limit)
+
+    return history
+
+
+@router.put("/skill-prompts/{skill_name}")
+async def update_skill_prompt(
+    request: Request,
+    skill_name: str,
+    data: SkillPromptUpdate
+):
+    """
+    Update a skill prompt (superadmin only).
+
+    Path parameters:
+        skill_name: Skill name ('qa', 'summary', 'coach', 'analytics')
+
+    Request body:
+        prompt: New prompt text
+        is_active: Whether to use this custom prompt
+        change_reason: Optional reason for the change
+
+    Returns updated prompt info with version.
+    """
+    user = await require_superadmin(request)
+
+    if skill_name not in ['qa', 'summary', 'coach', 'analytics', 'about']:
+        raise HTTPException(status_code=400, detail="Invalid skill name")
+
+    db = request.app.state.db
+
+    try:
+        new_version = await db.update_skill_prompt(
+            skill_name=skill_name,
+            prompt=data.prompt,
+            user_id=user['user_id'],
+            change_reason=data.change_reason,
+            is_active=data.is_active
+        )
+
+        return SkillPromptResponse(
+            skill_name=skill_name,
+            prompt=data.prompt,
+            is_active=data.is_active,
+            version=new_version,
+            updated_at=datetime.now().isoformat()
+        )
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/skill-prompts/{skill_name}/reset")
+async def reset_skill_prompt(
+    request: Request,
+    skill_name: str
+):
+    """
+    Reset a skill prompt to default (superadmin only).
+
+    This deactivates any custom prompt and reverts to the built-in default.
+
+    Path parameters:
+        skill_name: Skill name ('qa', 'summary', 'coach', 'analytics')
+
+    Returns success status.
+    """
+    user = await require_superadmin(request)
+
+    if skill_name not in ['qa', 'summary', 'coach', 'analytics', 'about']:
+        raise HTTPException(status_code=400, detail="Invalid skill name")
+
+    db = request.app.state.db
+    success = await db.reset_skill_prompt(skill_name, user['user_id'])
+
+    if not success:
+        raise HTTPException(status_code=404, detail=f"No custom prompt found for '{skill_name}'")
+
+    return {"skill_name": skill_name, "reset": True}

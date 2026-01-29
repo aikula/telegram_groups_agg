@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Panel - Telegram Chat Analytics</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/admin.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div>
+                <h1>🛡️ Панель суперадмина</h1>
+                <p style="color: var(--text-secondary);">Управление всеми чатами и отзывами</p>
+            </div>
+            <div class="header-controls">
+                <a href="/" class="btn btn-outline btn-sm">📊 Панель управления</a>
+                <div class="user-info">
+                    <div class="user-avatar" id="userAvatar">A</div>
+                    <span class="user-name" id="userName">Admin</span>
+                </div>
+                <button class="btn btn-outline btn-sm" onclick="logout()">
+                    Выйти
+                </button>
+            </div>
+        </header>
+
+        <!-- Alert Container -->
+        <div id="alertContainer"></div>
+
+        <!-- All Chats Section -->
+        <div class="card">
+            <div class="card-header">
+                <h2 class="card-title">🌐 Все чаты системы</h2>
+            </div>
+            <div class="filters">
+                <div class="filter-group">
+                    <label for="adminChatSelect">Выберите чат</label>
+                    <select id="adminChatSelect" class="form-control" style="min-width: 300px;">
+                        <option value="">Выберите чат...</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label>&nbsp;</label>
+                    <button class="btn btn-primary" onclick="loadSelectedChatSettings()">
+                        🔄 Загрузить настройки
+                    </button>
+                </div>
+            </div>
+
+            <div id="adminChatSettingsContent" style="display: none; margin-top: 20px;">
+                <h3 style="margin-bottom: 15px; color: var(--text-primary);">⚡ Включенные навыки</h3>
+                <div class="skills-grid" id="adminSkillsContainer">
+                    <!-- Skills will be loaded here -->
+                </div>
+
+                <h3 style="margin-top: 25px; margin-bottom: 15px; color: var(--text-primary);">⚙️ Дополнительные настройки</h3>
+                <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; border: 1px solid var(--border-color);">
+                    <div class="settings-row">
+                        <div class="settings-label">
+                            <strong>🌐 Язык</strong>
+                            <span>Язык общения бота</span>
+                        </div>
+                        <select id="adminSettingLanguage" class="form-control" style="width: auto;">
+                            <option value="ru">Русский</option>
+                            <option value="en">English</option>
+                        </select>
+                    </div>
+                    <div class="settings-row">
+                        <div class="settings-label">
+                            <strong>⏰ Время сводки</strong>
+                            <span>Когда отправлять ежедневную сводку</span>
+                        </div>
+                        <input type="time" id="adminSettingSummaryTime" class="form-control" style="width: auto;">
+                    </div>
+                    <div class="settings-row">
+                        <div class="settings-label">
+                            <strong>🌍 Часовой пояс</strong>
+                            <span>Часовой пояс для времени сводки</span>
+                        </div>
+                        <select id="adminSettingTimezone" class="form-control" style="width: auto;">
+                            <option value="Europe/Moscow">Москва (UTC+3)</option>
+                            <option value="Europe/Kaliningrad">Калининград (UTC+2)</option>
+                            <option value="Europe/Samara">Самара (UTC+4)</option>
+                            <option value="Asia/Yekaterinburg">Екатеринбург (UTC+5)</option>
+                            <option value="Asia/Omsk">Омск (UTC+6)</option>
+                            <option value="Asia/Krasnoyarsk">Красноярск (UTC+7)</option>
+                            <option value="Asia/Irkutsk">Иркутск (UTC+8)</option>
+                            <option value="Asia/Yakutsk">Якутск (UTC+9)</option>
+                            <option value="Asia/Vladivostok">Владивосток (UTC+10)</option>
+                            <option value="Asia/Magadan">Магадан (UTC+11)</option>
+                            <option value="Asia/Kamchatka">Камчатка (UTC+12)</option>
+                            <option value="UTC">UTC (UTC+0)</option>
+                        </select>
+                    </div>
+                    <div class="settings-row" style="flex-direction: column; align-items: flex-start;">
+                        <div class="settings-label" style="margin-bottom: 8px;">
+                            <strong>🎭 Характер бота</strong>
+                            <span>Имя, стиль общения, поведение бота в этом чате</span>
+                        </div>
+                        <textarea id="adminSettingBotPersonality" class="form-control" rows="3"
+                            placeholder="Пример: Ты Иван - дружелюбный ассистент, отвечаешь кратко и с юмором."></textarea>
+                    </div>
+                    <div class="settings-row" style="border-bottom: none;">
+                        <button class="btn btn-primary" onclick="saveAdminChatSettings()" style="width: 100%;">
+                            💾 Сохранить настройки
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Admin Actions -->
+                <h3 style="margin-top: 25px; margin-bottom: 15px; color: var(--text-primary);">🎬 Действия</h3>
+                <div class="filters">
+                    <button class="btn btn-secondary" onclick="adminGenerateSummary()">
+                        📊 Сгенерировать сводку
+                    </button>
+                    <button class="btn btn-success" onclick="adminSendSummary()">
+                        📤 Отправить в чат
+                    </button>
+                </div>
+
+                <!-- Bot Chat with Context -->
+                <h3 style="margin-top: 25px; margin-bottom: 15px; color: var(--text-primary);">🤖 Чат с ботом (контекст выбранного чата)</h3>
+                <div class="chat-container">
+                    <div class="chat-messages" id="adminChatMessages">
+                        <div class="chat-message system">
+                            Задайте вопрос боту. Он будет использовать контекст выбранного чата для ответов.
+                        </div>
+                    </div>
+                    <div class="chat-input-area">
+                        <input
+                            type="text"
+                            id="adminChatInput"
+                            class="chat-input"
+                            placeholder="Спросите что-нибудь о чате..."
+                            onkeypress="if(event.key === 'Enter') adminSendBotMessage()"
+                        >
+                        <button class="chat-send-btn" id="adminChatSendBtn" onclick="adminSendBotMessage()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Feedback Section -->
+        <div class="card">
+            <div class="card-header">
+                <h2 class="card-title">💬 Обратная связь пользователей</h2>
+            </div>
+            <div style="padding: 15px;">
+                <select id="feedbackFilter" onchange="loadFeedback()" style="margin-bottom: 15px; padding: 8px; border: 1px solid var(--border-color); border-radius: 4px;">
+                    <option value="">Все статусы</option>
+                    <option value="new">🆕 Новые</option>
+                    <option value="in_progress">🔄 В работе</option>
+                    <option value="resolved">✅ Решенные</option>
+                </select>
+                <div id="feedbackList">
+                    <p style="text-align: center; color: var(--text-secondary); padding: 20px;">
+                        Загрузка отзывов...
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Users Statistics -->
+        <div class="card">
+            <div class="card-header">
+                <h2 class="card-title">📈 Статистика по пользователям</h2>
+            </div>
+            <div id="usersStatsContent">
+                <p style="text-align: center; color: var(--text-secondary); padding: 20px;">
+                    Загрузка данных...
+                </p>
+            </div>
+        </div>
+
+        <!-- Skill Prompts Editor -->
+        <div class="card">
+            <div class="card-header">
+                <h2 class="card-title">✏️ Редактор промптов навыков</h2>
+            </div>
+            <div style="padding: 15px;">
+                <!-- Skill Selection -->
+                <div style="margin-bottom: 20px;">
+                    <label for="skillPromptSelect" style="display: block; margin-bottom: 8px; font-weight: 500;">
+                        🎯 Выберите навык для редактирования:
+                    </label>
+                    <select id="skillPromptSelect" class="form-control" style="min-width: 300px;" onchange="loadSelectedSkillPrompt()">
+                        <option value="">-- Выберите навык --</option>
+                        <option value="qa">❓ Вопрос-ответ (QA)</option>
+                        <option value="summary">📊 Сводки (Summary)</option>
+                        <option value="coach">🎓 Коучинг (Coach)</option>
+                        <option value="analytics">📈 Аналитика (Analytics)</option>
+                        <option value="about">ℹ️ О боте (About)</option>
+                    </select>
+                </div>
+
+                <!-- Prompt Editor Section -->
+                <div id="promptEditorSection" style="display: none;">
+                    <!-- Variables Reference -->
+                    <div style="background: #e3f2fd; padding: 15px; border-radius: 8px; margin-bottom: 20px; border-left: 4px solid #2196f3;">
+                        <h4 style="margin: 0 0 10px 0; color: #1976d2;">📝 Справка по переменным</h4>
+                        <p style="margin: 0 0 10px 0; font-size: 13px; color: #424242;">
+                            Используйте эти переменные в промпте - они будут автоматически заменены на реальные значения:
+                        </p>
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; font-size: 13px;">
+                            <div><code style="background: white; padding: 2px 6px; border-radius: 3px;">{chat_title}</code> — название чата</div>
+                            <div><code style="background: white; padding: 2px 6px; border-radius: 3px;">{chat_id}</code> — ID чата</div>
+                            <div><code style="background: white; padding: 2px 6px; border-radius: 3px;">{username}</code> — имя пользователя</div>
+                            <div><code style="background: white; padding: 2px 6px; border-radius: 3px;">{full_name}</code> — полное имя</div>
+                            <div><code style="background: white; padding: 2px 6px; border-radius: 3px;">{date}</code> — текущая дата</div>
+                            <div><code style="background: white; padding: 2px 6px; border-radius: 3px;">{language}</code> — язык (ru/en)</div>
+                            <div><code style="background: white; padding: 2px 6px; border-radius: 3px;">{model_name}</code> — модель LLM</div>
+                        </div>
+                    </div>
+
+                    <!-- Current Prompt Info -->
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                        <div>
+                            <h3 id="currentSkillName" style="margin: 0;">Навык</h3>
+                            <p id="currentSkillDesc" style="margin: 5px 0 0 0; color: var(--text-secondary); font-size: 14px;">Описание</p>
+                        </div>
+                        <div id="promptStatusBadge" style="padding: 6px 12px; border-radius: 20px; font-size: 13px; font-weight: 500;">
+                            Статус
+                        </div>
+                    </div>
+
+                    <!-- Prompt Textarea -->
+                    <div style="margin-bottom: 15px;">
+                        <label for="promptText" style="display: block; margin-bottom: 8px; font-weight: 500;">
+                            Текст промпта:
+                        </label>
+                        <textarea id="promptText" class="form-control" rows="15"
+                                  style="font-family: 'Consolas', 'Monaco', monospace; font-size: 13px; line-height: 1.5;"
+                                  placeholder="Введите текст промпта..."></textarea>
+                        <div style="margin-top: 8px; font-size: 12px; color: var(--text-secondary);">
+                            Минимум 50 символов. Используйте переменные из справки выше.
+                        </div>
+                    </div>
+
+                    <!-- Version History -->
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; margin-bottom: 8px; font-weight: 500;">
+                            📜 История версий (выберите активную):
+                        </label>
+                        <div id="versionHistoryList" style="max-height: 200px; overflow-y: auto; background: #f8f9fa; padding: 10px; border-radius: 6px; border: 1px solid var(--border-color);">
+                            <p style="text-align: center; color: var(--text-secondary); padding: 10px;">
+                                Загрузка версий...
+                            </p>
+                        </div>
+                    </div>
+
+                    <!-- Action Buttons -->
+                    <div style="display: flex; gap: 10px;">
+                        <button class="btn btn-primary" onclick="saveSkillPrompt()">
+                            💾 Сохранить как новую версию
+                        </button>
+                        <button class="btn btn-secondary" onclick="previewPrompt()">
+                            👁️ Предпросмотр с переменными
+                        </button>
+                        <button class="btn btn-outline" onclick="resetToDefaultPrompt()">
+                            🔄 Сбросить на дефолтный
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Empty State -->
+                <div id="promptEditorEmpty" style="text-align: center; padding: 40px 20px; color: var(--text-secondary);">
+                    <div style="font-size: 48px; margin-bottom: 15px;">✏️</div>
+                    <p>Выберите навык из списка выше для редактирования его промпта</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/admin.js"></script>
+</body>
+</html>

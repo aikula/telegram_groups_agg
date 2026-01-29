@@ -215,6 +215,53 @@ class Database:
             )
         """)
 
+        # Feedback table (v2.2)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                chat_id INTEGER,
+                source TEXT NOT NULL,
+                category TEXT,
+                message TEXT,
+                rating INTEGER,
+                status TEXT DEFAULT 'new',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                resolved_at TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (chat_id) REFERENCES chats(id)
+            )
+        """)
+
+        # Create skill prompts table (v2.2)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS skill_prompts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                skill_name TEXT NOT NULL UNIQUE,
+                prompt TEXT NOT NULL,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_by INTEGER,
+                version INTEGER DEFAULT 1,
+                FOREIGN KEY (created_by) REFERENCES users(id)
+            )
+        """)
+
+        # Create skill prompt versions table for history (v2.2)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS skill_prompt_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                skill_name TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_by INTEGER,
+                change_reason TEXT,
+                FOREIGN KEY (created_by) REFERENCES users(id)
+            )
+        """)
+
     async def _create_fts_tables(self, db: aiosqlite.Connection) -> None:
         """Create FTS5 virtual table for full-text search."""
 
@@ -563,47 +610,51 @@ class Database:
             }
 
     async def is_chat_member(self, user_id: int, chat_id: int) -> bool:
-        """Check if user is a member of chat (active, not left)."""
+        """
+        Check if user is a member of chat (active, not left).
+
+        Args:
+            user_id: Internal user ID (users.id)
+            chat_id: Internal chat ID (chats.id)
+
+        Returns:
+            True if user is an active member of the chat
+        """
         async with self.get_connection() as db:
             cursor = await db.execute(
                 """
-                SELECT 1 FROM chat_members
-                WHERE user_id = ? AND chat_id = ? AND left_at IS NULL
+                SELECT 1 FROM chat_members cm
+                JOIN users u ON COALESCE(u.telegram_id, u.id) = cm.user_id
+                WHERE u.id = ? AND cm.chat_id = ? AND cm.left_at IS NULL
                 LIMIT 1
                 """,
                 (user_id, chat_id)
             )
             return await cursor.fetchone() is not None
+
+    async def is_user_in_chat(self, user_id: int, chat_id: int) -> bool:
+        """Alias for is_chat_member - check if user is a member of chat."""
+        return await self.is_chat_member(user_id, chat_id)
 
     async def is_chat_admin(self, user_id: int, chat_id: int) -> bool:
-        """Check if user is admin of chat."""
+        """
+        Check if user is admin of chat.
+
+        Args:
+            user_id: Internal user ID (users.id)
+            chat_id: Internal chat ID (chats.id)
+        """
         async with self.get_connection() as db:
             cursor = await db.execute(
                 """
-                SELECT 1 FROM chat_members
-                WHERE user_id = ? AND chat_id = ? AND role = 'admin' AND left_at IS NULL
+                SELECT 1 FROM chat_members cm
+                JOIN users u ON COALESCE(u.telegram_id, u.id) = cm.user_id
+                WHERE u.id = ? AND cm.chat_id = ? AND role = 'admin' AND cm.left_at IS NULL
                 LIMIT 1
                 """,
                 (user_id, chat_id)
             )
             return await cursor.fetchone() is not None
-
-    async def get_user_chats(self, user_id: int) -> List[Dict[str, Any]]:
-        """Get all chats where user is an active member."""
-        async with self.get_connection() as db:
-            cursor = await db.execute(
-                """
-                SELECT c.id, c.title, c.type, cm.role
-                FROM chats c
-                JOIN chat_members cm ON c.id = cm.chat_id
-                WHERE cm.user_id = ? AND cm.left_at IS NULL AND c.deleted_at IS NULL
-                ORDER BY c.id
-                """,
-                (user_id,)
-            )
-            rows = await cursor.fetchall()
-            columns = [desc[0] for desc in cursor.description]
-            return [dict(zip(columns, row)) for row in rows]
 
     # === Chat Operations ===
 
@@ -611,17 +662,20 @@ class Database:
         self,
         chat_id: int,
         title: str,
-        chat_type: str = "supergroup"
+        chat_type: str = "supergroup",
+        creator_user_id: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Get existing chat or create new one.
 
         v2.1: Uses chat_id column (Telegram chat ID) separately from id (internal PK).
+        v2.2: Adds creator as owner when creating new chat.
 
         Args:
             chat_id: Telegram chat ID
             title: Chat title
             chat_type: Type of chat (group, supergroup)
+            creator_user_id: Optional telegram user_id of chat creator (to add as owner)
 
         Returns:
             Chat data dictionary with both 'id' (internal) and 'chat_id' (Telegram)
@@ -650,6 +704,14 @@ class Database:
 
             # Get the auto-generated internal id
             internal_id = cursor.lastrowid
+
+            # If creator provided, add them as owner to chat_members
+            if creator_user_id:
+                await self.add_chat_member(
+                    chat_id=internal_id,  # Use internal ID for chat_members
+                    user_id=creator_user_id,  # Telegram user ID
+                    role="owner"
+                )
 
             return {
                 "id": internal_id,
@@ -704,6 +766,41 @@ class Database:
 
             await db.commit()
 
+    async def update_member_left_at(
+        self,
+        chat_id: int,
+        user_id: int
+    ) -> None:
+        """Mark user as having left the chat."""
+        async with self.get_connection() as db:
+            await db.execute(
+                """
+                UPDATE chat_members
+                SET left_at = CURRENT_TIMESTAMP
+                WHERE chat_id = ? AND user_id = ?
+                """,
+                (chat_id, user_id)
+            )
+            await db.commit()
+
+    async def update_member_role(
+        self,
+        chat_id: int,
+        user_id: int,
+        role: str
+    ) -> None:
+        """Update user's role in the chat."""
+        async with self.get_connection() as db:
+            await db.execute(
+                """
+                UPDATE chat_members
+                SET role = ?
+                WHERE chat_id = ? AND user_id = ?
+                """,
+                (role, chat_id, user_id)
+            )
+            await db.commit()
+
     # === Message Operations ===
 
     async def save_message(
@@ -718,7 +815,7 @@ class Database:
         Save message with encryption.
 
         Args:
-            chat_id: Telegram chat ID
+            chat_id: Telegram chat ID (will be converted to internal id)
             message_id: Telegram message ID
             user_id: Sender user ID
             content: Message text content
@@ -727,9 +824,25 @@ class Database:
         Returns:
             Internal message ID
         """
-        # Encrypt content
+        # Convert Telegram chat_id to internal id (chats.id)
+        # messages.chat_id references chats(id), not chats(chat_id)
+        async with self.get_connection() as db:
+            cursor = await db.execute(
+                "SELECT id FROM chats WHERE chat_id = ?",
+                (chat_id,)
+            )
+            row = await cursor.fetchone()
+            if not row:
+                # Chat doesn't exist yet, this shouldn't happen in normal flow
+                # as get_or_create_chat should be called first
+                logger.warning(f"Chat {chat_id} not found in database, cannot save message")
+                raise ValueError(f"Chat {chat_id} not found in database. Call get_or_create_chat first.")
+            internal_chat_id = row[0]
+
+        # Encrypt content using Telegram chat_id (for encryption key)
         encrypted = self._crypto.encrypt(chat_id, content)
 
+        # Save using internal chat_id
         async with self.get_connection() as db:
             cursor = await db.execute(
                 """
@@ -740,7 +853,7 @@ class Database:
                     content_encrypted = excluded.content_encrypted,
                     timestamp = excluded.timestamp
                 """,
-                (message_id, chat_id, user_id, content, encrypted, timestamp.isoformat())
+                (message_id, internal_chat_id, user_id, content, encrypted, timestamp.isoformat())
             )
             await db.commit()
             return cursor.lastrowid
@@ -1494,6 +1607,41 @@ class Database:
                 }
             return None
 
+    async def get_user_by_id(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Get user by internal ID.
+
+        Args:
+            user_id: Internal user ID (users.id)
+
+        Returns:
+            User dict or None
+        """
+        async with self.get_connection() as db:
+            cursor = await db.execute(
+                """
+                SELECT id, username, first_name, last_name, language_code,
+                       is_superadmin, password_hash, created_at, telegram_id
+                FROM users WHERE id = ?
+                """,
+                (user_id,)
+            )
+            row = await cursor.fetchone()
+
+            if row:
+                return {
+                    "id": row[0],
+                    "username": row[1],
+                    "first_name": row[2],
+                    "last_name": row[3],
+                    "language_code": row[4],
+                    "is_superadmin": row[5],
+                    "password_hash": row[6],
+                    "created_at": row[7],
+                    "telegram_id": row[8]
+                }
+            return None
+
     async def create_user(
         self,
         username: str,
@@ -1583,13 +1731,13 @@ class Database:
             async with self.get_connection() as db:
                 # Check if user with this telegram_id exists
                 existing = await db.execute(
-                    "SELECT id FROM users WHERE telegram_id = ?",
+                    "SELECT id, username, first_name, last_name FROM users WHERE telegram_id = ?",
                     (telegram_id,)
                 )
                 row = await existing.fetchone()
 
                 if row:
-                    # Update existing user
+                    # Update existing user (created via OAuth with telegram_id set)
                     await db.execute(
                         """
                         UPDATE users
@@ -1599,27 +1747,46 @@ class Database:
                         (username, first_name, last_name, row[0])
                     )
                 else:
-                    # Create new user with unique username
-                    # Add suffix if username already exists
-                    unique_username = username
-                    counter = 1
-                    while True:
-                        check = await db.execute(
-                            "SELECT id FROM users WHERE username = ?",
-                            (unique_username,)
-                        )
-                        if not await check.fetchone():
-                            break
-                        unique_username = f"{username}_{counter}"
-                        counter += 1
-
-                    await db.execute(
-                        """
-                        INSERT INTO users (telegram_id, username, first_name, last_name)
-                        VALUES (?, ?, ?, ?)
-                        """,
-                        (telegram_id, unique_username, first_name, last_name)
+                    # Check if user exists with id = telegram_id but telegram_id is NULL
+                    # This handles users created via get_or_create_user() where id=telegram_id but telegram_id=NULL
+                    legacy = await db.execute(
+                        "SELECT id, username FROM users WHERE id = ? AND telegram_id IS NULL",
+                        (telegram_id,)
                     )
+                    legacy_row = await legacy.fetchone()
+
+                    if legacy_row:
+                        # Update legacy user to set telegram_id
+                        await db.execute(
+                            """
+                            UPDATE users
+                            SET telegram_id = ?, username = ?, first_name = ?, last_name = ?
+                            WHERE id = ?
+                            """,
+                            (telegram_id, username, first_name, last_name, legacy_row[0])
+                        )
+                    else:
+                        # Create new user with unique username
+                        # Add suffix if username already exists
+                        unique_username = username
+                        counter = 1
+                        while True:
+                            check = await db.execute(
+                                "SELECT id FROM users WHERE username = ?",
+                                (unique_username,)
+                            )
+                            if not await check.fetchone():
+                                break
+                            unique_username = f"{username}_{counter}"
+                            counter += 1
+
+                        await db.execute(
+                            """
+                            INSERT INTO users (telegram_id, username, first_name, last_name)
+                            VALUES (?, ?, ?, ?)
+                            """,
+                            (telegram_id, unique_username, first_name, last_name)
+                        )
 
                 await db.commit()
                 return True
@@ -1691,7 +1858,7 @@ class Database:
             if active_only:
                 cursor = await db.execute(
                     """
-                    SELECT id, title, type, created_at, deleted_at
+                    SELECT id, chat_id, title, type, created_at, deleted_at
                     FROM chats WHERE deleted_at IS NULL
                     ORDER BY created_at DESC
                     LIMIT ?
@@ -1701,7 +1868,7 @@ class Database:
             else:
                 cursor = await db.execute(
                     """
-                    SELECT id, title, type, created_at, deleted_at
+                    SELECT id, chat_id, title, type, created_at, deleted_at
                     FROM chats
                     ORDER BY created_at DESC
                     LIMIT ?
@@ -1710,16 +1877,38 @@ class Database:
                 )
 
             rows = await cursor.fetchall()
-            return [
-                {
+
+            # Filter out private bot chats
+            from app.config import settings
+            bot_username = settings.telegram_bot_username
+            if bot_username:
+                bot_username = bot_username.lstrip('@').lower()
+
+            result = []
+            for row in rows:
+                chat_type = row[3]
+                title = row[2] or ""
+                chat_id = row[1]
+
+                # Skip private chats with the bot
+                if chat_type == 'private':
+                    if bot_username and title.lower() == bot_username:
+                        logger.debug(f"Filtering out private bot chat: {title}")
+                        continue
+                    if chat_id > 0 and title and title[0].isupper() and ' ' not in title:
+                        logger.debug(f"Filtering out likely private bot chat: {title}")
+                        continue
+
+                result.append({
                     "id": row[0],
-                    "title": row[1],
-                    "chat_type": row[2],
-                    "created_at": row[3],
-                    "deleted_at": row[4]
-                }
-                for row in rows
-            ]
+                    "chat_id": row[1],
+                    "title": row[2],
+                    "type": row[3],
+                    "created_at": row[4],
+                    "deleted_at": row[5]
+                })
+
+            return result
 
     async def get_user_chats(
         self,
@@ -1731,22 +1920,27 @@ class Database:
         Get list of chats where user is a member.
 
         Args:
-            user_id: User ID (Telegram user_id)
+            user_id: Internal user ID (users.id)
             active_only: Only return active (not deleted) chats
             limit: Maximum chats to return
 
         Returns:
             List of chat dicts where user is a member
+
+        Note:
+            chat_members.user_id stores telegram_id, so we need to join with users
+            to get the telegram_id from the internal user_id.
         """
         async with self.get_connection() as db:
             if active_only:
                 cursor = await db.execute(
                     """
-                    SELECT c.id, c.title, c.type, c.created_at, c.deleted_at,
+                    SELECT c.id, c.chat_id, c.title, c.type, c.created_at, c.deleted_at,
                            (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) as message_count
                     FROM chats c
                     INNER JOIN chat_members cm ON c.id = cm.chat_id
-                    WHERE cm.user_id = ?
+                    INNER JOIN users u ON COALESCE(u.telegram_id, u.id) = cm.user_id
+                    WHERE u.id = ?
                       AND c.deleted_at IS NULL
                       AND cm.left_at IS NULL
                     ORDER BY c.created_at DESC
@@ -1757,11 +1951,12 @@ class Database:
             else:
                 cursor = await db.execute(
                     """
-                    SELECT c.id, c.title, c.type, c.created_at, c.deleted_at,
+                    SELECT c.id, c.chat_id, c.title, c.type, c.created_at, c.deleted_at,
                            (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) as message_count
                     FROM chats c
                     INNER JOIN chat_members cm ON c.id = cm.chat_id
-                    WHERE cm.user_id = ? AND cm.left_at IS NULL
+                    INNER JOIN users u ON COALESCE(u.telegram_id, u.id) = cm.user_id
+                    WHERE u.id = ? AND cm.left_at IS NULL
                     ORDER BY c.created_at DESC
                     LIMIT ?
                     """,
@@ -1769,17 +1964,45 @@ class Database:
                 )
 
             rows = await cursor.fetchall()
-            return [
-                {
+
+            # Filter out private bot chats
+            from app.config import settings
+            bot_username = settings.telegram_bot_username
+            if bot_username:
+                bot_username = bot_username.lstrip('@').lower()
+
+            result = []
+            for row in rows:
+                chat_type = row[3]
+                title = row[2] or ""
+                chat_id = row[1]
+
+                # Skip private chats with the bot
+                # Private bot chats have:
+                # - type = 'private'
+                # - title matches bot username OR chat_id is positive (private chat IDs are positive)
+                if chat_type == 'private':
+                    # Check if title matches bot username
+                    if bot_username and title.lower() == bot_username:
+                        logger.debug(f"Filtering out private bot chat: {title}")
+                        continue
+                    # Also filter if chat_id is positive (Telegram private chat IDs are positive)
+                    # and title looks like a bot name (starts with uppercase, no spaces)
+                    if chat_id > 0 and title and title[0].isupper() and ' ' not in title:
+                        logger.debug(f"Filtering out likely private bot chat: {title}")
+                        continue
+
+                result.append({
                     "id": row[0],
-                    "title": row[1],
-                    "chat_type": row[2],
-                    "created_at": row[3],
-                    "deleted_at": row[4],
-                    "member_count": row[5]
-                }
-                for row in rows
-            ]
+                    "chat_id": row[1],
+                    "title": row[2],
+                    "type": row[3],
+                    "created_at": row[4],
+                    "deleted_at": row[5],
+                    "member_count": row[6]
+                })
+
+            return result
 
     async def get_message_by_id(self, message_id: int) -> Optional[Dict[str, Any]]:
         """
@@ -1985,21 +2208,24 @@ class Database:
         Get members of a chat.
 
         Args:
-            chat_id: Telegram chat ID
+            chat_id: Internal chat ID (chats.id)
             active_only: Only return active members (not left)
             limit: Maximum members to return
 
         Returns:
-            List of member dicts
+            List of member dicts with internal user_id
+
+        Note:
+            chat_members.user_id stores telegram_id, so we join on users.telegram_id
         """
         async with self.get_connection() as db:
             if active_only:
                 cursor = await db.execute(
                     """
-                    SELECT cm.user_id, u.username, u.first_name, u.last_name,
+                    SELECT u.id as user_id, u.username, u.first_name, u.last_name,
                            cm.role, cm.joined_at
                     FROM chat_members cm
-                    JOIN users u ON cm.user_id = u.id
+                    JOIN users u ON COALESCE(u.telegram_id, u.id) = cm.user_id
                     WHERE cm.chat_id = ? AND cm.left_at IS NULL
                     ORDER BY cm.joined_at DESC
                     LIMIT ?
@@ -2009,10 +2235,10 @@ class Database:
             else:
                 cursor = await db.execute(
                     """
-                    SELECT cm.user_id, u.username, u.first_name, u.last_name,
+                    SELECT u.id as user_id, u.username, u.first_name, u.last_name,
                            cm.role, cm.joined_at, cm.left_at
                     FROM chat_members cm
-                    JOIN users u ON cm.user_id = u.id
+                    JOIN users u ON COALESCE(u.telegram_id, u.id) = cm.user_id
                     WHERE cm.chat_id = ?
                     ORDER BY cm.joined_at DESC
                     LIMIT ?
@@ -2167,6 +2393,413 @@ class Database:
             )
             await db.commit()
             return cursor.rowcount
+
+    # ========== Feedback Methods (v2.2) ==========
+
+    async def create_feedback(
+        self,
+        user_id: int,
+        chat_id: int,
+        source: str,
+        category: str,
+        message: str,
+        rating: int = None
+    ) -> int:
+        """
+        Create a new feedback entry.
+
+        Args:
+            user_id: User ID
+            chat_id: Chat ID
+            source: Source of feedback ('web' or 'bot')
+            category: Category ('bug', 'feature', 'other')
+            message: Feedback message
+            rating: Optional rating 1-5
+
+        Returns:
+            Feedback ID
+        """
+        async with self.get_connection() as db:
+            cursor = await db.execute(
+                """
+                INSERT INTO feedback (user_id, chat_id, source, category, message, rating)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, chat_id, source, category, message, rating)
+            )
+            await db.commit()
+            feedback_id = cursor.lastrowid
+            logger.info(f"Feedback created: id={feedback_id}, user={user_id}, category={category}")
+            return feedback_id
+
+    async def get_feedback(
+        self,
+        status: Optional[str] = None,
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """
+        Get feedback entries for admin view.
+
+        Args:
+            status: Filter by status ('new', 'in_progress', 'resolved'), None for all
+            limit: Maximum entries to return
+
+        Returns:
+            List of feedback dicts
+        """
+        async with self.get_connection() as db:
+            if status:
+                cursor = await db.execute(
+                    """
+                    SELECT f.id, f.user_id, f.chat_id, f.source, f.category,
+                           f.message, f.rating, f.status, f.created_at, f.resolved_at,
+                           u.username, c.title as chat_title
+                    FROM feedback f
+                    LEFT JOIN users u ON f.user_id = u.id
+                    LEFT JOIN chats c ON f.chat_id = c.id
+                    WHERE f.status = ?
+                    ORDER BY f.created_at DESC
+                    LIMIT ?
+                    """,
+                    (status, limit)
+                )
+            else:
+                cursor = await db.execute(
+                    """
+                    SELECT f.id, f.user_id, f.chat_id, f.source, f.category,
+                           f.message, f.rating, f.status, f.created_at, f.resolved_at,
+                           u.username, c.title as chat_title
+                    FROM feedback f
+                    LEFT JOIN users u ON f.user_id = u.id
+                    LEFT JOIN chats c ON f.chat_id = c.id
+                    ORDER BY f.created_at DESC
+                    LIMIT ?
+                    """,
+                    (limit,)
+                )
+
+            rows = await cursor.fetchall()
+            columns = [desc[0] for desc in cursor.description]
+
+            return [dict(zip(columns, row)) for row in rows]
+
+    async def update_feedback_status(
+        self,
+        feedback_id: int,
+        status: str
+    ) -> bool:
+        """
+        Update feedback status.
+
+        Args:
+            feedback_id: Feedback ID
+            status: New status ('new', 'in_progress', 'resolved')
+
+        Returns:
+            True if updated, False otherwise
+        """
+        if status not in ['new', 'in_progress', 'resolved']:
+            logger.warning(f"Invalid feedback status: {status}")
+            return False
+
+        now = datetime.now().isoformat()
+        resolved_at = now if status == 'resolved' else None
+
+        async with self.get_connection() as db:
+            cursor = await db.execute(
+                "UPDATE feedback SET status = ?, resolved_at = ? WHERE id = ?",
+                (status, resolved_at, feedback_id)
+            )
+            await db.commit()
+
+            updated = cursor.rowcount > 0
+            if updated:
+                logger.info(f"Feedback {feedback_id} status updated to '{status}'")
+            return updated
+
+
+    # ============================================================================
+    # Skill Prompts Methods (v2.2)
+    # ============================================================================
+
+    async def get_skill_prompt(self, skill_name: str) -> Optional[str]:
+        """
+        Get active custom prompt for a skill.
+
+        Args:
+            skill_name: Skill name ('qa', 'summary', 'coach', 'analytics')
+
+        Returns:
+            Custom prompt text if active, None otherwise
+        """
+        async with self.get_connection() as db:
+            cursor = await db.execute(
+                """SELECT prompt FROM skill_prompts
+                   WHERE skill_name = ? AND is_active = TRUE
+                   ORDER BY version DESC LIMIT 1""",
+                (skill_name,)
+            )
+            row = await cursor.fetchone()
+
+            if row and row[0]:
+                logger.debug(f"Found custom prompt for skill '{skill_name}'")
+                return row[0]
+
+            logger.debug(f"No active custom prompt for skill '{skill_name}'")
+            return None
+
+    async def get_all_skill_prompts(self) -> List[Dict[str, Any]]:
+        """
+        Get all skill prompts with version info.
+
+        Returns ALL available skills with their current prompts
+        (either custom from DB or default from skill class).
+
+        Returns:
+            List of skill prompts with metadata including is_custom flag
+        """
+        # Import skill registry
+        from app.skills import get_skill_class
+
+        # All available skills
+        all_skills = ['qa', 'summary', 'coach', 'analytics', 'about']
+
+        # Get custom prompts from DB
+        async with self.get_connection() as db:
+            cursor = await db.execute(
+                """SELECT skill_name, prompt, is_active, version,
+                          created_at, updated_at, created_by
+                   FROM skill_prompts
+                   ORDER BY skill_name"""
+            )
+            rows = await cursor.fetchall()
+
+        # Build dict of custom prompts (keep only latest version of each)
+        custom_prompts = {}
+        for row in rows:
+            if row[0] not in custom_prompts:  # Keep only first (latest) version
+                custom_prompts[row[0]] = {
+                    'skill_name': row[0],
+                    'prompt': row[1],
+                    'is_active': bool(row[2]),
+                    'version': row[3],
+                    'created_at': row[4],
+                    'updated_at': row[5],
+                    'created_by': row[6],
+                    'is_custom': True
+                }
+
+        # Build result with all skills
+        results = []
+        for skill_name in all_skills:
+            if skill_name in custom_prompts:
+                # Use custom prompt from DB
+                results.append(custom_prompts[skill_name])
+            else:
+                # Use default prompt from skill class
+                try:
+                    skill = get_skill_class(skill_name)
+                    # Create instance with db and call the default prompt method with minimal context
+                    skill_instance = skill(db=self)
+                    # Provide minimal required context for all skills
+                    default_context = {
+                        'chat_id': 0,
+                        'chat_title': 'Test Chat',
+                        'username': 'testuser',
+                        'date': '2026-01-29'
+                    }
+                    default_prompt = skill_instance._get_default_prompt(default_context)
+
+                    results.append({
+                        'skill_name': skill_name,
+                        'prompt': default_prompt,
+                        'is_active': False,  # Custom prompt not active
+                        'version': 0,  # Default has no version
+                        'created_at': None,
+                        'updated_at': None,
+                        'created_by': None,
+                        'is_custom': False
+                    })
+                except Exception as e:
+                    logger.warning(f"Could not get default prompt for {skill_name}: {e}")
+
+        return results
+
+    async def get_skill_prompt_history(
+        self,
+        skill_name: str,
+        limit: int = 20
+    ) -> List[Dict[str, Any]]:
+        """
+        Get version history for a skill prompt.
+
+        Args:
+            skill_name: Skill name
+            limit: Maximum versions to return
+
+        Returns:
+            List of prompt versions with metadata
+        """
+        async with self.get_connection() as db:
+            cursor = await db.execute(
+                """SELECT spv.id, spv.skill_name, spv.prompt, spv.version,
+                          spv.created_at, spv.created_by, spv.change_reason,
+                          u.username
+                   FROM skill_prompt_versions spv
+                   LEFT JOIN users u ON spv.created_by = u.id
+                   WHERE spv.skill_name = ?
+                   ORDER BY spv.version DESC, spv.created_at DESC
+                   LIMIT ?""",
+                (skill_name, limit)
+            )
+            rows = await cursor.fetchall()
+
+            return [
+                {
+                    'id': row[0],
+                    'skill_name': row[1],
+                    'prompt': row[2],
+                    'version': row[3],
+                    'created_at': row[4],
+                    'created_by': row[5],
+                    'change_reason': row[6],
+                    'username': row[7]
+                }
+                for row in rows
+            ]
+
+    async def update_skill_prompt(
+        self,
+        skill_name: str,
+        prompt: str,
+        user_id: int,
+        change_reason: Optional[str] = None,
+        is_active: bool = True
+    ) -> int:
+        """
+        Update or create a custom skill prompt.
+
+        Args:
+            skill_name: Skill name ('qa', 'summary', 'coach', 'analytics')
+            prompt: New prompt text
+            user_id: User ID making the change
+            change_reason: Optional reason for the change
+            is_active: Whether to use this prompt
+
+        Returns:
+            New version number
+        """
+        now = datetime.now().isoformat()
+
+        # Validate skill name
+        valid_skills = {'qa', 'summary', 'coach', 'analytics', 'about'}
+        if skill_name not in valid_skills:
+            raise ValueError(f"Invalid skill_name: {skill_name}. Must be one of {valid_skills}")
+
+        # Validate prompt length
+        if not prompt or len(prompt.strip()) < 50:
+            raise ValueError("Prompt must be at least 50 characters")
+        if len(prompt) > 50000:
+            raise ValueError("Prompt must not exceed 50000 characters")
+
+        async with self.get_connection() as db:
+            # Check if prompt already exists
+            cursor = await db.execute(
+                "SELECT version, is_active FROM skill_prompts WHERE skill_name = ? ORDER BY version DESC LIMIT 1",
+                (skill_name,)
+            )
+            row = await cursor.fetchone()
+
+            if row:
+                current_version = row[0]
+                was_active = row[1]
+                new_version = current_version + 1
+
+                # Save old version to history
+                await db.execute(
+                    """INSERT INTO skill_prompt_versions (skill_name, prompt, version, created_at, created_by, change_reason)
+                       SELECT skill_name, prompt, ?, ?, ?, ? FROM skill_prompts
+                       WHERE skill_name = ? ORDER BY version DESC LIMIT 1""",
+                    (new_version, now, user_id, change_reason, skill_name)
+                )
+
+                # Update existing prompt
+                await db.execute(
+                    """UPDATE skill_prompts
+                       SET prompt = ?, is_active = ?, updated_at = ?, created_by = ?, version = ?
+                       WHERE skill_name = ? AND version = ?""",
+                    (prompt, is_active, now, user_id, new_version, skill_name, current_version)
+                )
+            else:
+                new_version = 1
+
+                # Create new prompt
+                await db.execute(
+                    """INSERT INTO skill_prompts (skill_name, prompt, is_active, created_at, updated_at, created_by, version)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (skill_name, prompt, is_active, now, now, user_id, new_version)
+                )
+
+            # Also save to history
+            await db.execute(
+                """INSERT INTO skill_prompt_versions (skill_name, prompt, version, created_at, created_by, change_reason)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (skill_name, prompt, new_version, now, user_id, change_reason or f"Version {new_version}")
+            )
+
+            await db.commit()
+
+            # Log the action
+            await self.audit_log(
+                user_id=user_id,
+                action="skill_prompt_updated",
+                details={
+                    "skill_name": skill_name,
+                    "version": new_version,
+                    "is_active": is_active,
+                    "change_reason": change_reason
+                }
+            )
+
+            logger.info(f"Skill prompt '{skill_name}' updated to version {new_version} by user {user_id}")
+            return new_version
+
+    async def toggle_skill_prompt(self, skill_name: str, is_active: bool) -> bool:
+        """
+        Toggle a custom prompt on/off without changing the content.
+
+        Args:
+            skill_name: Skill name
+            is_active: Whether to use the custom prompt
+
+        Returns:
+            True if successful, False otherwise
+        """
+        async with self.get_connection() as db:
+            cursor = await db.execute(
+                "UPDATE skill_prompts SET is_active = ? WHERE skill_name = ?",
+                (is_active, skill_name)
+            )
+            await db.commit()
+
+            success = cursor.rowcount > 0
+            if success:
+                logger.info(f"Skill prompt '{skill_name}' {'activated' if is_active else 'deactivated'}")
+
+            return success
+
+    async def reset_skill_prompt(self, skill_name: str, user_id: int) -> bool:
+        """
+        Reset a skill prompt to default (deactivate custom prompt).
+
+        Args:
+            skill_name: Skill name
+            user_id: User ID making the change
+
+        Returns:
+            True if successful, False otherwise
+        """
+        return await self.toggle_skill_prompt(skill_name, False)
 
 
 # Singleton instance

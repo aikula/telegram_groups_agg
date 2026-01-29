@@ -76,10 +76,10 @@ class BaseSkill(ABC):
             output_format = "text"
             temperature = 0.7
 
-            def get_system_prompt(self, context):
+            def _get_default_prompt(self, context):
                 return "You are a helpful assistant..."
 
-            def format_output(self, text):
+            async def format_output(self, text):
                 return text[:4000]  # Telegram limit
     """
 
@@ -109,9 +109,23 @@ class BaseSkill(ABC):
         self.skill_name = self.name  # Use class attribute
 
     @abstractmethod
-    def get_system_prompt(self, context: Dict[str, Any]) -> str:
+    def _get_default_prompt(self, context: Dict[str, Any]) -> str:
+        """
+        Get default system prompt for this skill (factory method).
+
+        Args:
+            context: Dict with chat_id, username, full_name, chat_title, date
+
+        Returns:
+            Default system prompt string for LLM
+        """
+        pass
+
+    async def get_system_prompt(self, context: Dict[str, Any]) -> str:
         """
         Get system prompt for this skill.
+
+        Checks database for custom prompts first, falls back to default.
 
         Args:
             context: Dict with chat_id, username, full_name, chat_title, date
@@ -119,7 +133,41 @@ class BaseSkill(ABC):
         Returns:
             System prompt string for LLM
         """
-        pass
+        # Check database for custom prompt
+        custom_prompt = await self.db.get_skill_prompt(self.skill_name)
+
+        if custom_prompt:
+            # Apply variable substitution to custom prompt
+            return self._substitute_prompt_variables(custom_prompt, context)
+
+        # Fall back to default prompt
+        return self._get_default_prompt(context)
+
+    def _substitute_prompt_variables(self, prompt: str, context: Dict[str, Any]) -> str:
+        """
+        Substitute variables in prompt template.
+
+        Args:
+            prompt: Prompt template with placeholders
+            context: Context dict with variable values
+
+        Returns:
+            Prompt with substituted values
+        """
+        substitutions = {
+            "{chat_id}": str(context.get("chat_id", "")),
+            "{chat_title}": context.get("chat_title", ""),
+            "{username}": context.get("username", ""),
+            "{full_name}": context.get("full_name", ""),
+            "{date}": context.get("date", ""),
+            "{model_name}": getattr(self.llm, "model_name", "gpt-4o-mini"),
+        }
+
+        result = prompt
+        for placeholder, value in substitutions.items():
+            result = result.replace(placeholder, value)
+
+        return result
 
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
         """
