@@ -70,3 +70,4 @@ credentials/
 *.swp
 *.swo
 *~
+backups/
